@@ -1,5 +1,5 @@
 /* Minimal service worker for offline shell + iOS home-screen install */
-const CACHE = "messenger-v1";
+const CACHE = "kalagram-v3";
 const PRECACHE = ["/", "/static/css/style.css", "/static/js/app.js", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

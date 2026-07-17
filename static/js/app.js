@@ -120,40 +120,90 @@
   function setAvatar(el, user, opts = {}) {
     if (!el) return;
     const isGroup = opts.isGroup || user?.is_group;
-    // clear previous online dot then rebuild
     const wasOnline = !!user?.online;
-    el.querySelector(".dot")?.remove();
+
+    // Keep structure: [img.avatar-photo?] [span.avatar-initials] [span.dot?]
+    let img = el.querySelector("img.avatar-photo");
+    let ini = el.querySelector("span.avatar-initials");
+    if (!ini) {
+      // migrate old text-only avatars
+      const oldText = (el.textContent || "").replace(/\s+/g, "").slice(0, 4);
+      el.textContent = "";
+      ini = document.createElement("span");
+      ini.className = "avatar-initials";
+      if (oldText && oldText !== "👥") ini.textContent = oldText;
+      el.appendChild(ini);
+    }
+    el.querySelectorAll(":scope > .dot").forEach((d) => d.remove());
+
     if (isGroup) {
       el.classList.add("group-av", "has-img");
-      el.style.backgroundImage = "none";
       el.style.background = "linear-gradient(145deg, #5b7cfa, #a56cff)";
-      el.textContent = "👥";
+      if (img) {
+        img.remove();
+        img = null;
+      }
+      ini.textContent = "👥";
+      ini.hidden = false;
       el.style.color = "#fff";
       return;
     }
+
     el.classList.remove("group-av");
+    el.style.background = "";
     const name = user?.display_name || user?.nick || "?";
-    const hasAvatar = !!(user?.avatar);
-    el.classList.toggle("has-img", hasAvatar);
+    const hasAvatar = !!(user && user.avatar);
+
     if (hasAvatar) {
-      // IMPORTANT: do not set style.background after backgroundImage —
-      // shorthand "background" wipes background-image.
-      const url = user.avatar + (user.avatar.includes("?") ? "&" : "?") + "v=" + encodeURIComponent(user.avatar);
-      el.textContent = "";
-      el.style.color = "transparent";
-      el.style.backgroundImage = `url("${url}")`;
-      el.style.backgroundSize = "cover";
-      el.style.backgroundPosition = "center";
-      el.style.backgroundRepeat = "no-repeat";
-      el.style.backgroundColor = "#2a3145";
+      el.classList.add("has-img");
+      if (!img) {
+        img = document.createElement("img");
+        img.className = "avatar-photo";
+        img.alt = name;
+        img.decoding = "async";
+        img.referrerPolicy = "no-referrer";
+        el.insertBefore(img, ini);
+      }
+      // cache-bust when URL changes
+      const src =
+        user.avatar +
+        (user.avatar.includes("?") ? "&" : "?") +
+        "t=" +
+        encodeURIComponent(String(user.avatar).split("/").pop() || Date.now());
+      if (img.dataset.src !== src) {
+        img.dataset.src = src;
+        img.src = src;
+      }
+      img.onerror = () => {
+        // if image fails, show initials
+        el.classList.remove("has-img");
+        img.style.display = "none";
+        ini.hidden = false;
+        ini.textContent = initials(name);
+      };
+      img.onload = () => {
+        img.style.display = "block";
+        ini.hidden = true;
+      };
+      // if already cached
+      if (img.complete && img.naturalWidth) {
+        img.style.display = "block";
+        ini.hidden = true;
+      }
+      ini.textContent = initials(name);
     } else {
-      el.textContent = initials(name);
-      el.style.backgroundImage = "none";
+      el.classList.remove("has-img");
+      if (img) {
+        img.remove();
+      }
+      ini.hidden = false;
+      ini.textContent = initials(name);
       let h = 0;
       for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
       el.style.background = `linear-gradient(145deg, hsl(${h},45%,38%), hsl(${(h + 40) % 360},50%,28%))`;
       el.style.color = "#e8ecf4";
     }
+
     if (wasOnline) {
       const dot = document.createElement("span");
       dot.className = "dot";
@@ -161,9 +211,10 @@
     }
   }
 
-  /** Convert any image (incl. iPhone HEIC when browser supports) to JPEG blob for upload */
-  function fileToJpegBlob(file, maxSide = 512, quality = 0.88) {
-    return new Promise((resolve, reject) => {
+  /** Resize/compress image to JPEG for reliable upload (iPhone photos) */
+  function fileToJpegBlob(file, maxSide = 720, quality = 0.85) {
+    return new Promise((resolve) => {
+      // already small jpeg/png — still normalize via canvas when possible
       const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => {
@@ -176,34 +227,33 @@
             return;
           }
           const scale = Math.min(1, maxSide / Math.max(w, h));
-          w = Math.round(w * scale);
-          h = Math.round(h * scale);
+          w = Math.max(1, Math.round(w * scale));
+          h = Math.max(1, Math.round(h * scale));
           const canvas = document.createElement("canvas");
           canvas.width = w;
           canvas.height = h;
           const ctx = canvas.getContext("2d");
-          ctx.fillStyle = "#1a1f2b";
+          ctx.fillStyle = "#111";
           ctx.fillRect(0, 0, w, h);
           ctx.drawImage(img, 0, 0, w, h);
           canvas.toBlob(
             (blob) => {
               URL.revokeObjectURL(url);
-              if (blob) resolve(blob);
-              else reject(new Error("Не удалось обработать фото"));
+              resolve(blob || file);
             },
             "image/jpeg",
             quality
           );
         } catch (e) {
           URL.revokeObjectURL(url);
-          reject(e);
+          resolve(file);
         }
       };
       img.onerror = () => {
         URL.revokeObjectURL(url);
-        // fallback: upload original
         resolve(file);
       };
+      // iOS sometimes needs decode from file reader
       img.src = url;
     });
   }
@@ -1382,40 +1432,65 @@
       }
     });
 
-    $("#profile-avatar").addEventListener("click", () => $("#avatar-input").click());
+    $("#profile-avatar").addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const input = $("#avatar-input");
+      if (input) {
+        input.value = "";
+        input.click();
+      }
+    });
     $("#avatar-input").addEventListener("change", async (e) => {
-      const file = e.target.files?.[0];
+      const file = e.target.files && e.target.files[0];
       if (!file) return;
-      toast("Загрузка фото…", 1500);
+      if (!state.token) {
+        toast("Сначала войдите");
+        return;
+      }
+      toast("Загрузка фото…", 2000);
       try {
-        // resize + JPEG so iPhone photos upload reliably
         const blob = await fileToJpegBlob(file);
+        if (!blob || blob.size < 10) throw new Error("Пустое фото");
+        if (blob.size > 2 * 1024 * 1024) throw new Error("Файл больше 2 МБ");
         const fd = new FormData();
-        fd.append("file", blob, "avatar.jpg");
+        const fname =
+          (blob.type || "").includes("png") ? "avatar.png" : "avatar.jpg";
+        fd.append("file", blob, fname);
         const res = await fetch("/api/me/avatar", {
           method: "POST",
-          headers: { Authorization: `Bearer ${state.token}` },
+          headers: { Authorization: "Bearer " + state.token },
           credentials: "include",
           body: fd,
         });
+        const text = await res.text();
         let data = null;
         try {
-          data = await res.json();
+          data = JSON.parse(text);
         } catch {
-          throw new Error("Сервер не ответил");
+          throw new Error(res.ok ? "Плохой ответ сервера" : "Ошибка " + res.status);
         }
         if (!res.ok) {
-          const d = data?.detail;
-          throw new Error(typeof d === "string" ? d : "Ошибка загрузки");
+          const d = data.detail;
+          throw new Error(
+            typeof d === "string" ? d : Array.isArray(d) ? d[0]?.msg || "Ошибка" : "Ошибка загрузки"
+          );
         }
         state.me = data;
-        // force-refresh avatars in UI
-        setAvatar($("#me-avatar-btn"), state.me);
-        setAvatar($("#profile-avatar"), state.me);
+        // hard refresh both places
+        ["#me-avatar-btn", "#profile-avatar"].forEach((sel) => {
+          const node = $(sel);
+          if (node) {
+            node.querySelector("img.avatar-photo")?.remove();
+            setAvatar(node, state.me);
+          }
+        });
         renderProfile();
+        // also refresh chat list avatars later
+        if (state.chats?.length) renderChats();
         toast("Аватар обновлён");
       } catch (err) {
-        console.error(err);
+        console.error("avatar upload", err);
         toast(err.message || "Не удалось сменить аватар");
       }
       e.target.value = "";

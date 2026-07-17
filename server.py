@@ -667,30 +667,30 @@ async def upload_avatar(
         raise HTTPException(status_code=400, detail="Файл больше 2 МБ")
     if not content:
         raise HTTPException(status_code=400, detail="Пустой файл")
-    ctype = (file.content_type or "").lower()
-    if ctype not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
-        if not (
-            content[:3] == b"\xff\xd8\xff"
-            or content[:8] == b"\x89PNG\r\n\x1a\n"
-            or content[:4] == b"RIFF"
-            or content[:6] in (b"GIF87a", b"GIF89a")
-        ):
-            raise HTTPException(status_code=400, detail="Нужно изображение (JPG/PNG/WebP/GIF)")
-        if content[:3] == b"\xff\xd8\xff":
-            ext = "jpg"
-        elif content[:8] == b"\x89PNG\r\n\x1a\n":
-            ext = "png"
-        elif content[:6] in (b"GIF87a", b"GIF89a"):
-            ext = "gif"
-        else:
-            ext = "webp"
+    # Detect type by magic bytes first (more reliable than browser Content-Type)
+    if content[:3] == b"\xff\xd8\xff":
+        ext, mime = "jpg", "image/jpeg"
+    elif content[:8] == b"\x89PNG\r\n\x1a\n":
+        ext, mime = "png", "image/png"
+    elif content[:6] in (b"GIF87a", b"GIF89a"):
+        ext, mime = "gif", "image/gif"
+    elif content[:4] == b"RIFF" and b"WEBP" in content[:16]:
+        ext, mime = "webp", "image/webp"
     else:
-        ext = {
-            "image/jpeg": "jpg",
-            "image/png": "png",
-            "image/webp": "webp",
-            "image/gif": "gif",
-        }[ctype]
+        ctype = (file.content_type or "").lower()
+        if ctype in ("image/jpeg", "image/jpg"):
+            ext, mime = "jpg", "image/jpeg"
+        elif ctype == "image/png":
+            ext, mime = "png", "image/png"
+        elif ctype == "image/webp":
+            ext, mime = "webp", "image/webp"
+        elif ctype == "image/gif":
+            ext, mime = "gif", "image/gif"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Нужно фото JPG/PNG. На iPhone: «Файл» → снимок или «Самое совместимое».",
+            )
 
     if user.get("avatar"):
         old = AVATARS / Path(user["avatar"]).name
@@ -701,12 +701,6 @@ async def upload_avatar(
                 pass
 
     name = f"{user['id']}_{secrets.token_hex(8)}.{ext}"
-    mime = {
-        "jpg": "image/jpeg",
-        "png": "image/png",
-        "webp": "image/webp",
-        "gif": "image/gif",
-    }.get(ext, "image/jpeg")
     try:
         path = AVATARS / name
         path.write_bytes(content)

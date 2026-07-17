@@ -20,7 +20,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png" />
   <title>Калаграм</title>
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="/static/css/style.css?v=3" />
 </head>
 <body>
   <div id="app">
@@ -215,7 +215,7 @@
         <div class="profile scroll">
           <div class="profile-hero">
             <button type="button" class="avatar avatar-xl profile-avatar" id="profile-avatar" aria-label="Сменить аватар"></button>
-            <input type="file" id="avatar-input" accept="image/*,image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif" capture="user" hidden />
+            <input type="file" id="avatar-input" accept="image/*" hidden />
             <p class="profile-hint">Нажмите на фото, чтобы сменить</p>
             <h2 id="profile-display"></h2>
             <p class="profile-nick" id="profile-nick"></p>
@@ -240,6 +240,6 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status"></div>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v=3"></script>
 </body>
 </html>
