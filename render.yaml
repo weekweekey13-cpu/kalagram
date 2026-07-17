@@ -18,3 +18,7 @@ services:
         generateValue: true
       - key: DATA_DIR
         value: /opt/render/project/src/data
+      # Add free Neon Postgres and set DATABASE_URL in Render dashboard:
+      # https://console.neon.tech → New project → Connection string
+      # - key: DATABASE_URL
+      #   sync: false

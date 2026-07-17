@@ -1,0 +1,31 @@
+Чтобы чаты и аккаунты НЕ пропадали на Render (бесплатно):
+
+1) Зайдите: https://console.neon.tech
+   Войдите через GitHub (как раньше).
+
+2) New Project → имя Kalagram → Create
+   (регион можно Europe)
+
+3) Скопируйте Connection string
+   (URI, начинается с postgresql:// ... )
+   Если видите "pooled" — берите его.
+
+4) Render: https://dashboard.render.com
+   → сервис kalagram-z20h
+   → Environment (слева)
+   → Add Environment Variable
+
+   Key:   DATABASE_URL
+   Value: (вставьте строку из Neon)
+
+   Убедитесь что есть:
+   MESSENGER_CLOUD = 1
+   USE_HTTP = 1
+   MESSENGER_SECRET = kalagram2026secret
+
+5) Save → Manual Deploy → Deploy latest commit
+   (или просто подождите авто-деплой)
+
+6) Откройте https://kalagram-z20h.onrender.com
+   Зарегистрируйтесь ЗАНОВО один раз.
+   После этого данные будут сохраняться.

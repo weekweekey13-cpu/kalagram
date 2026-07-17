@@ -19,6 +19,15 @@ from typing import Any
 import aiosqlite
 import jwt
 import uvicorn
+from db import (
+    USE_PG,
+    close_pool,
+    connect,
+    init_pool,
+    init_schema,
+    load_media,
+    save_media,
+)
 from fastapi import (
     Cookie,
     Depends,
@@ -207,86 +216,10 @@ def clear_auth(response: Response) -> None:
 
 # ── database ────────────────────────────────────────────────────
 async def init_db() -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript(
-            """
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nick TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                password_hash TEXT NOT NULL,
-                display_name TEXT,
-                avatar TEXT,
-                created_at REAL NOT NULL,
-                last_seen REAL
-            );
-            CREATE TABLE IF NOT EXISTS contacts (
-                user_id INTEGER NOT NULL,
-                contact_id INTEGER NOT NULL,
-                created_at REAL NOT NULL,
-                PRIMARY KEY (user_id, contact_id),
-                FOREIGN KEY (user_id) REFERENCES users(id),
-                FOREIGN KEY (contact_id) REFERENCES users(id)
-            );
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sender_id INTEGER NOT NULL,
-                receiver_id INTEGER,
-                text TEXT NOT NULL DEFAULT '',
-                created_at REAL NOT NULL,
-                read_at REAL,
-                FOREIGN KEY (sender_id) REFERENCES users(id)
-            );
-            CREATE TABLE IF NOT EXISTS chat_groups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                owner_id INTEGER NOT NULL,
-                created_at REAL NOT NULL,
-                FOREIGN KEY (owner_id) REFERENCES users(id)
-            );
-            CREATE TABLE IF NOT EXISTS group_members (
-                group_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                joined_at REAL NOT NULL,
-                PRIMARY KEY (group_id, user_id),
-                FOREIGN KEY (group_id) REFERENCES chat_groups(id),
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            );
-            CREATE TABLE IF NOT EXISTS group_reads (
-                group_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                last_read_id INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (group_id, user_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_msg_pair
-                ON messages(sender_id, receiver_id, created_at);
-            CREATE INDEX IF NOT EXISTS idx_msg_receiver
-                ON messages(receiver_id, read_at);
-            """
-        )
-        # migrate older DBs / add new columns then indexes
-        cur = await db.execute("PRAGMA table_info(messages)")
-        cols = {r[1] for r in await cur.fetchall()}
-        alters = []
-        if "group_id" not in cols:
-            alters.append("ALTER TABLE messages ADD COLUMN group_id INTEGER")
-        if "msg_type" not in cols:
-            alters.append(
-                "ALTER TABLE messages ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'text'"
-            )
-        if "media_url" not in cols:
-            alters.append("ALTER TABLE messages ADD COLUMN media_url TEXT")
-        if "duration" not in cols:
-            alters.append("ALTER TABLE messages ADD COLUMN duration REAL")
-        for sql in alters:
-            try:
-                await db.execute(sql)
-            except sqlite3.OperationalError:
-                pass
-        await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_msg_group ON messages(group_id, created_at)"
-        )
-        await db.commit()
+    await init_pool()
+    await init_schema(DB_PATH)
+    mode = "PostgreSQL (постоянно)" if USE_PG else "SQLite (локально / временный диск)"
+    print(f"  БД: {mode}")
 
 
 def user_row(row: aiosqlite.Row | None) -> dict[str, Any] | None:
@@ -303,14 +236,14 @@ def user_row(row: aiosqlite.Row | None) -> dict[str, Any] | None:
 
 
 async def db_get_user(user_id: int) -> dict[str, Any] | None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM users WHERE id = ?", (user_id,))
         return user_row(await cur.fetchone())
 
 
 async def db_get_user_by_nick(nick: str) -> dict[str, Any] | None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM users WHERE nick = ? COLLATE NOCASE", (nick,)
@@ -352,7 +285,7 @@ def msg_dict(r: aiosqlite.Row | dict) -> dict[str, Any]:
 
 
 async def is_group_member(group_id: int, user_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
             (group_id, user_id),
@@ -361,7 +294,7 @@ async def is_group_member(group_id: int, user_id: int) -> bool:
 
 
 async def get_group_member_ids(group_id: int) -> list[int]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT user_id FROM group_members WHERE group_id = ?", (group_id,)
         )
@@ -369,7 +302,7 @@ async def get_group_member_ids(group_id: int) -> list[int]:
 
 
 async def get_group_info(group_id: int) -> dict[str, Any] | None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM chat_groups WHERE id = ?", (group_id,))
         g = await cur.fetchone()
@@ -436,8 +369,20 @@ async def save_voice_file(content: bytes, content_type: str | None, user_id: int
         else:
             ext = "webm"
     name = f"{user_id}_{secrets.token_hex(10)}.{ext}"
-    path = VOICE / name
-    path.write_bytes(content)
+    mime = {
+        "webm": "audio/webm",
+        "ogg": "audio/ogg",
+        "m4a": "audio/mp4",
+        "mp3": "audio/mpeg",
+        "wav": "audio/wav",
+    }.get(ext, content_type or "application/octet-stream")
+    try:
+        path = VOICE / name
+        path.write_bytes(content)
+    except OSError:
+        pass
+    # always store in DB so media survives Render restarts when using Postgres
+    await save_media(name, mime, content, DB_PATH)
     return f"/api/voice/{name}"
 
 
@@ -454,7 +399,7 @@ async def insert_message(
     now = time.time()
     # Older DBs may have receiver_id NOT NULL — use 0 for group messages
     rid = receiver_id if group_id is None else (receiver_id or 0)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         cur = await db.execute(
             """
             INSERT INTO messages
@@ -530,7 +475,7 @@ class ConnectionManager:
                     del self.active[user_id]
         still = self.is_online(user_id)
         if not still:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with connect(DB_PATH) as db:
                 await db.execute(
                     "UPDATE users SET last_seen = ? WHERE id = ?",
                     (time.time(), user_id),
@@ -560,7 +505,7 @@ class ConnectionManager:
             "last_seen": None if online else time.time(),
         }
         targets: set[int] = set()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with connect(DB_PATH) as db:
             cur = await db.execute(
                 """
                 SELECT user_id FROM contacts WHERE contact_id = ?
@@ -593,6 +538,7 @@ manager = ConnectionManager()
 async def lifespan(app: FastAPI):
     await init_db()
     yield
+    await close_pool()
 
 
 app = FastAPI(title="Калаграм", lifespan=lifespan)
@@ -605,7 +551,7 @@ async def register(body: RegisterIn):
     if existing:
         raise HTTPException(status_code=400, detail="Этот ник уже занят")
     now = time.time()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         try:
             cur = await db.execute(
                 """
@@ -616,8 +562,11 @@ async def register(body: RegisterIn):
             )
             await db.commit()
             uid = cur.lastrowid
-        except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail="Этот ник уже занят")
+        except Exception as e:
+            err = str(e).lower()
+            if "unique" in err or "integrity" in err or type(e).__name__ == "IntegrityError":
+                raise HTTPException(status_code=400, detail="Этот ник уже занят")
+            raise
     user = await db_get_user(uid)
     token = make_token(uid, user["nick"])
     payload = {"token": token, "user": {**user, "online": True}}
@@ -629,7 +578,12 @@ async def register(body: RegisterIn):
 @app.post("/api/login")
 async def login(body: LoginIn):
     row = await db_get_user_by_nick(body.nick.strip())
-    if not row or not verify_password(body.password, row["password_hash"]):
+    if not row:
+        raise HTTPException(
+            status_code=401,
+            detail="Пользователь не найден. На free-хостинге без DATABASE_URL данные сбрасываются — зарегистрируйтесь снова.",
+        )
+    if not verify_password(body.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Неверный ник или пароль")
     user = {
         "id": row["id"],
@@ -641,7 +595,7 @@ async def login(body: LoginIn):
         "online": True,
     }
     token = make_token(user["id"], user["nick"])
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET last_seen = ? WHERE id = ?", (time.time(), user["id"])
         )
@@ -679,7 +633,7 @@ async def logout():
 async def update_me(body: ProfileIn, user: dict = Depends(get_current_user)):
     if body.display_name is not None:
         name = body.display_name.strip() or user["nick"]
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE users SET display_name = ? WHERE id = ?", (name, user["id"])
             )
@@ -731,10 +685,20 @@ async def upload_avatar(
                 pass
 
     name = f"{user['id']}_{secrets.token_hex(8)}.{ext}"
-    path = AVATARS / name
-    path.write_bytes(content)
+    mime = {
+        "jpg": "image/jpeg",
+        "png": "image/png",
+        "webp": "image/webp",
+        "gif": "image/gif",
+    }.get(ext, "image/jpeg")
+    try:
+        path = AVATARS / name
+        path.write_bytes(content)
+    except OSError:
+        pass
+    await save_media(name, mime, content, DB_PATH)
     avatar_url = f"/api/avatars/{name}"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET avatar = ? WHERE id = ?", (avatar_url, user["id"])
         )
@@ -746,25 +710,35 @@ async def upload_avatar(
 async def get_avatar(filename: str):
     safe = Path(filename).name
     path = AVATARS / safe
-    if not path.exists() or not path.is_file():
+    if path.exists() and path.is_file():
+        return FileResponse(path)
+    stored = await load_media(safe, DB_PATH)
+    if not stored:
         raise HTTPException(status_code=404)
-    return FileResponse(path)
+    data, ctype = stored
+    return Response(content=data, media_type=ctype)
 
 
 @app.get("/api/voice/{filename}")
 async def get_voice(filename: str):
     safe = Path(filename).name
     path = VOICE / safe
-    if not path.exists() or not path.is_file():
-        raise HTTPException(status_code=404)
-    media = {
+    media_map = {
         ".webm": "audio/webm",
         ".ogg": "audio/ogg",
         ".m4a": "audio/mp4",
         ".mp3": "audio/mpeg",
         ".wav": "audio/wav",
-    }.get(path.suffix.lower(), "application/octet-stream")
-    return FileResponse(path, media_type=media)
+    }
+    if path.exists() and path.is_file():
+        return FileResponse(
+            path, media_type=media_map.get(path.suffix.lower(), "application/octet-stream")
+        )
+    stored = await load_media(safe, DB_PATH)
+    if not stored:
+        raise HTTPException(status_code=404)
+    data, ctype = stored
+    return Response(content=data, media_type=ctype)
 
 
 # ── users & contacts ────────────────────────────────────────────
@@ -774,7 +748,7 @@ async def search_users(q: str = "", user: dict = Depends(get_current_user)):
     if len(q) < 1:
         return []
     like = f"%{q}%"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
@@ -808,7 +782,7 @@ async def search_users(q: str = "", user: dict = Depends(get_current_user)):
 
 @app.get("/api/contacts")
 async def list_contacts(user: dict = Depends(get_current_user)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
@@ -842,7 +816,7 @@ async def add_contact(contact_id: int, user: dict = Depends(get_current_user)):
     target = await db_get_user(contact_id)
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         await db.execute(
             """
             INSERT OR IGNORE INTO contacts (user_id, contact_id, created_at)
@@ -856,7 +830,7 @@ async def add_contact(contact_id: int, user: dict = Depends(get_current_user)):
 
 @app.delete("/api/contacts/{contact_id}")
 async def remove_contact(contact_id: int, user: dict = Depends(get_current_user)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         await db.execute(
             "DELETE FROM contacts WHERE user_id = ? AND contact_id = ?",
             (user["id"], contact_id),
@@ -877,7 +851,7 @@ async def create_group(body: GroupCreateIn, user: dict = Depends(get_current_use
             raise HTTPException(status_code=404, detail=f"Пользователь {mid} не найден")
     now = time.time()
     all_ids = [user["id"], *member_ids]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO chat_groups (name, owner_id, created_at) VALUES (?, ?, ?)",
             (body.name, user["id"], now),
@@ -928,7 +902,7 @@ async def add_group_members(
         raise HTTPException(status_code=403, detail="Вы не в этой группе")
     now = time.time()
     added = []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         for mid in body.member_ids:
             if mid == user["id"]:
                 continue
@@ -974,7 +948,7 @@ async def get_group_messages(
     info = await get_group_info(group_id)
     if not info:
         raise HTTPException(status_code=404, detail="Группа не найдена")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if before:
             cur = await db.execute(
@@ -1067,7 +1041,7 @@ async def send_group_voice(
 async def list_chats(user: dict = Depends(get_current_user)):
     uid = user["id"]
     chats: list[dict[str, Any]] = []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         # private chats
         cur = await db.execute(
@@ -1215,7 +1189,7 @@ async def get_messages(
     if not peer:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     uid = user["id"]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if before:
             cur = await db.execute(
@@ -1292,7 +1266,7 @@ async def send_message(
     )
     await broadcast_message(msg, user)
     now = time.time()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR IGNORE INTO contacts (user_id, contact_id, created_at) VALUES (?, ?, ?)",
             (user["id"], peer_id, now),
@@ -1326,7 +1300,7 @@ async def send_voice(
     )
     await broadcast_message(msg, user)
     now = time.time()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR IGNORE INTO contacts (user_id, contact_id, created_at) VALUES (?, ?, ?)",
             (user["id"], peer_id, now),
