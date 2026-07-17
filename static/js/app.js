@@ -1617,11 +1617,15 @@
 
     $("#btn-back-chats").addEventListener("click", () => {
       stopRecording(true);
+      exitSelectMode();
       state.peer = null;
       state.isGroup = false;
       showPanel("chats");
       loadChats();
     });
+
+    $("#btn-select-cancel")?.addEventListener("click", () => exitSelectMode());
+    $("#btn-select-delete")?.addEventListener("click", () => deleteSelectedMessages());
 
     $("#btn-open-search").addEventListener("click", () => showPanel("search"));
     $("#btn-open-search-2").addEventListener("click", () => showPanel("search"));
