@@ -170,10 +170,11 @@ async def ensure_vapid_keys_db(connect_fn, db_path) -> tuple[Any, str]:
 
 
 def _normalize_b64(s: str) -> str:
-    """Ensure urlsafe b64 without newlines; keep unpadded for web-push."""
-    s = (s or "").strip().replace("-", "+").replace("_", "/")
-    # don't convert — pywebpush accepts urlsafe; restore urlsafe
-    s = (s or "").strip().replace("+", "-").replace("/", "_").replace("\n", "")
+    """Strip whitespace/padding; keep urlsafe alphabet for pywebpush."""
+    s = (s or "").strip().replace("\n", "").replace("\r", "")
+    # standard b64 → urlsafe if needed
+    if "+" in s or "/" in s:
+        s = s.replace("+", "-").replace("/", "_")
     return s.rstrip("=")
 
 
