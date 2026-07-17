@@ -969,15 +969,33 @@ img { display: block; max-width: 100%; }
 .composer-inner.has-text .mic-btn { display: none; }
 .composer-inner:not(.has-text) .send-btn { display: none; }
 
-/* Voice recording bar */
+/* Voice recording bar — overlay so mic button stays under finger */
+.composer {
+  position: relative;
+}
+
 .record-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 4px 2px;
+  position: absolute;
+  left: 8px;
+  right: 56px; /* leave mic button free under finger */
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-pill);
+  pointer-events: auto;
 }
 
 .record-bar.hidden { display: none; }
+
+.composer.is-recording .composer-inner textarea,
+.composer.is-recording .composer-inner .send-btn {
+  visibility: hidden;
+}
 
 .rec-wave {
   flex: 1;

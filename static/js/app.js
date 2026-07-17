@@ -1538,9 +1538,13 @@
   }
 
   // ── Voice recording ──────────────────────
-  // Hold mic → record, release → send. Mic stream is reused (no re-prompt).
-  const MIN_VOICE_SEC = 0.45;
+  // Hold mic → record, release → send.
+  // Always PCM→WAV (MediaRecorder is unreliable on iOS / empty blobs).
+  // Mic stream is reused so permission is asked once.
+  const MIN_VOICE_SEC = 0.5;
   const MAX_VOICE_SEC = 120;
+  let sharedAudioCtx = null;
+  let holdListenersBound = false;
 
   function micBlockReason() {
     const isLocal =
@@ -1559,24 +1563,6 @@
       return "Браузер не даёт API микрофона. Откройте в Safari и по HTTPS";
     }
     return null;
-  }
-
-  function pickMimeType() {
-    if (!window.MediaRecorder) return "";
-    const types = [
-      "audio/mp4",
-      "audio/aac",
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/ogg;codecs=opus",
-      "audio/ogg",
-    ];
-    for (const t of types) {
-      try {
-        if (MediaRecorder.isTypeSupported(t)) return t;
-      } catch {}
-    }
-    return "";
   }
 
   function encodeWav(samples, sampleRate) {
@@ -1608,11 +1594,29 @@
     return new Blob([buffer], { type: "audio/wav" });
   }
 
+  function unlockAudioContext() {
+    // Must run inside user gesture (pointerdown) so iOS allows capture
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    if (!sharedAudioCtx || sharedAudioCtx.state === "closed") {
+      try {
+        sharedAudioCtx = new AC();
+      } catch {
+        sharedAudioCtx = null;
+        return null;
+      }
+    }
+    if (sharedAudioCtx.state === "suspended") {
+      sharedAudioCtx.resume().catch(() => {});
+    }
+    return sharedAudioCtx;
+  }
+
   function micStreamIsLive() {
     const s = state.micStream;
     if (!s) return false;
     const tracks = s.getAudioTracks();
-    return tracks.length > 0 && tracks.some((t) => t.readyState === "live");
+    return tracks.length > 0 && tracks.some((t) => t.readyState === "live" && t.enabled);
   }
 
   async function ensureMicStream() {
@@ -1631,7 +1635,6 @@
       },
     });
     state.micStream = stream;
-    // If OS kills track later, drop cache so we re-request cleanly once
     stream.getAudioTracks().forEach((t) => {
       t.onended = () => {
         if (state.micStream === stream) state.micStream = null;
@@ -1641,21 +1644,52 @@
   }
 
   function releaseMicStream() {
+    stopPcmCapture(true);
     if (state.micStream) {
       try {
         state.micStream.getTracks().forEach((t) => t.stop());
       } catch {}
       state.micStream = null;
     }
+    if (sharedAudioCtx && sharedAudioCtx.state !== "closed") {
+      try {
+        sharedAudioCtx.close();
+      } catch {}
+      sharedAudioCtx = null;
+    }
   }
 
-  function startWavFallback(stream) {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new AudioCtx();
-    // resume needed on iOS after user gesture
+  function stopPcmCapture(discardChunks) {
+    const w = state.wavFallback;
+    if (!w) return null;
+    state.recordingActive = false;
     try {
-      if (ctx.state === "suspended") ctx.resume();
+      if (w.processor) w.processor.disconnect();
+      if (w.source) w.source.disconnect();
+      if (w.mute) w.mute.disconnect();
     } catch {}
+    // do NOT close shared AudioContext — reuse for next recording
+    const chunks = discardChunks ? [] : w.chunks || [];
+    const rate = (w.ctx && w.ctx.sampleRate) || 44100;
+    state.wavFallback = null;
+    state.recordMode = null;
+    state.recordReady = false;
+    if (discardChunks || !chunks.length) return null;
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    if (total < 16) return null;
+    const samples = new Float32Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      samples.set(c, off);
+      off += c.length;
+    }
+    const targetRate = 16000;
+    const down = downsampleMono(samples, rate, targetRate);
+    return encodeWav(down, targetRate);
+  }
+
+  function startPcmCapture(stream, ctx) {
+    // Capture raw PCM into chunks — works on iOS + desktop
     const source = ctx.createMediaStreamSource(stream);
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     const mute = ctx.createGain();
@@ -1663,78 +1697,99 @@
     const chunks = [];
     processor.onaudioprocess = (e) => {
       if (!state.recordingActive) return;
-      const data = e.inputBuffer.getChannelData(0);
-      chunks.push(new Float32Array(data));
+      const input = e.inputBuffer.getChannelData(0);
+      // copy — buffer is reused by the browser
+      chunks.push(new Float32Array(input));
     };
     source.connect(processor);
-    // must connect somewhere or onaudioprocess won't fire; mute so no feedback
     processor.connect(mute);
     mute.connect(ctx.destination);
     state.wavFallback = { ctx, source, processor, mute, chunks, stream };
     state.mediaRecorder = null;
     state.recordMode = "wav";
     state.recordReady = true;
-  }
-
-  function finishWavFallback() {
-    const w = state.wavFallback;
-    if (!w) return null;
-    try {
-      w.processor.disconnect();
-      w.source.disconnect();
-      if (w.mute) w.mute.disconnect();
-      w.ctx.close();
-    } catch {}
-    const total = w.chunks.reduce((n, c) => n + c.length, 0);
-    if (total < 100) {
-      state.wavFallback = null;
-      return null;
-    }
-    const samples = new Float32Array(total);
-    let off = 0;
-    for (const c of w.chunks) {
-      samples.set(c, off);
-      off += c.length;
-    }
-    const rate = w.ctx.sampleRate || 44100;
-    // downsample for smaller upload
-    const targetRate = 16000;
-    const down = downsampleMono(samples, rate, targetRate);
-    state.wavFallback = null;
-    return encodeWav(down, targetRate);
+    state.recordingActive = true;
   }
 
   function showRecordUI() {
-    const main = $("#composer-main");
+    // Keep #composer-main visible so mic button stays under the finger.
+    // Record bar is an overlay above the composer.
     const bar = $("#record-bar");
-    if (main) main.classList.add("hidden");
     if (bar) bar.classList.remove("hidden");
+    const wrap = $(".composer");
+    if (wrap) wrap.classList.add("is-recording");
     const mic = $("#btn-mic");
     if (mic) mic.classList.add("recording");
     const t = $("#rec-time");
     if (t) t.textContent = "0:00";
     const hint = $("#rec-hint");
-    if (hint) hint.textContent = "Отпустите, чтобы отправить";
+    if (hint) hint.textContent = "Отпустите — отправить";
     clearInterval(state.recordTimer);
     state.recordTimer = setInterval(() => {
       const sec = (Date.now() - state.recordStart) / 1000;
       if (t) t.textContent = formatDuration(sec);
-      if (sec >= MAX_VOICE_SEC) {
-        // auto-send at max length
-        finishHoldRecording(true);
-      }
+      if (sec >= MAX_VOICE_SEC) finishHoldRecording(true);
     }, 100);
   }
 
   function hideRecordUI() {
     clearInterval(state.recordTimer);
     state.recordTimer = null;
-    const main = $("#composer-main");
     const bar = $("#record-bar");
     if (bar) bar.classList.add("hidden");
-    if (main) main.classList.remove("hidden");
+    const wrap = $(".composer");
+    if (wrap) wrap.classList.remove("is-recording");
     const mic = $("#btn-mic");
     if (mic) mic.classList.remove("recording");
+  }
+
+  function unbindHoldWindow() {
+    if (!holdListenersBound) return;
+    window.removeEventListener("pointerup", onHoldPointerUp, true);
+    window.removeEventListener("pointercancel", onHoldPointerCancel, true);
+    window.removeEventListener("blur", onHoldWindowBlur);
+    holdListenersBound = false;
+  }
+
+  function bindHoldWindow() {
+    if (holdListenersBound) return;
+    window.addEventListener("pointerup", onHoldPointerUp, true);
+    window.addEventListener("pointercancel", onHoldPointerCancel, true);
+    window.addEventListener("blur", onHoldWindowBlur);
+    holdListenersBound = true;
+  }
+
+  function onHoldPointerUp(e) {
+    if (!state.holdRecording && !state.recordingActive) return;
+    if (state.recordPointerId != null && e.pointerId !== state.recordPointerId) return;
+    state.holdRecording = false;
+    state.recordPointerId = null;
+    unbindHoldWindow();
+    if (state.sendingVoice) return;
+    if (!state.recordingActive && !state.wavFallback) return;
+    finishHoldRecording(false);
+  }
+
+  function onHoldPointerCancel(e) {
+    if (state.recordPointerId != null && e.pointerId !== state.recordPointerId) return;
+    // Don't cancel on accidental cancel if still recording long — treat as release-send
+    if (state.recordingActive && state.wavFallback) {
+      onHoldPointerUp(e);
+      return;
+    }
+    state.holdRecording = false;
+    state.recordPointerId = null;
+    unbindHoldWindow();
+    stopRecording(true);
+  }
+
+  function onHoldWindowBlur() {
+    if (!state.recordingActive) return;
+    // App backgrounded mid-record → send what we have
+    state.holdRecording = false;
+    state.recordPointerId = null;
+    unbindHoldWindow();
+    finishHoldRecording(false);
   }
 
   async function startRecording() {
@@ -1744,45 +1799,30 @@
       toast(block, 5000);
       return false;
     }
+    // Unlock audio BEFORE await so iOS keeps the user-gesture context
+    const ctx = unlockAudioContext();
+    if (!ctx) {
+      toast("Аудио не поддерживается в этом браузере");
+      return false;
+    }
     try {
       const stream = await ensureMicStream();
-      state.recordStream = stream;
+      // resume again after await (iOS)
+      try {
+        if (ctx.state === "suspended") await ctx.resume();
+      } catch {}
+
+      // clean previous graph if any
+      stopPcmCapture(true);
+
       state.recordChunks = [];
       state.recordBlob = null;
       state.recordDuration = 0;
       state.recordStart = Date.now();
-      state.recordingActive = true;
-      state.recordReady = false;
-      state.recordMode = "media";
+      state.recordStream = stream;
       state.mediaRecorder = null;
-      state.wavFallback = null;
 
-      const mime = pickMimeType();
-      const canMR = typeof MediaRecorder !== "undefined";
-
-      if (canMR) {
-        try {
-          const rec = mime
-            ? new MediaRecorder(stream, { mimeType: mime })
-            : new MediaRecorder(stream);
-          state.mediaRecorder = rec;
-          rec.ondataavailable = (e) => {
-            if (e.data && e.data.size > 0) state.recordChunks.push(e.data);
-          };
-          rec.onerror = () => {
-            toast("Ошибка записи");
-          };
-          // timeslice so we get data even if stop is quick
-          rec.start(100);
-          state.recordReady = true;
-          showRecordUI();
-          return true;
-        } catch (e) {
-          console.warn("MediaRecorder failed, WAV fallback", e);
-        }
-      }
-
-      startWavFallback(stream);
+      startPcmCapture(stream, ctx);
       showRecordUI();
       return true;
     } catch (err) {
@@ -1801,120 +1841,30 @@
     }
   }
 
-  async function collectRecordedBlob() {
-    const started = state.recordStart;
-    const duration = Math.max(0, (Date.now() - started) / 1000);
-    let blob = null;
-    let mime = "audio/wav";
-
-    if (state.recordMode === "wav" || state.wavFallback) {
-      blob = finishWavFallback();
-      mime = "audio/wav";
-    } else {
-      const rec = state.mediaRecorder;
-      if (rec && rec.state !== "inactive") {
-        await new Promise((resolve) => {
-          const done = () => resolve();
-          rec.addEventListener("stop", done, { once: true });
-          try {
-            if (typeof rec.requestData === "function") {
-              try {
-                rec.requestData();
-              } catch {}
-            }
-            rec.stop();
-          } catch {
-            resolve();
-          }
-          // safety timeout
-          setTimeout(resolve, 1500);
-        });
-        // give last dataavailable a tick
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      mime = (rec && rec.mimeType) || pickMimeType() || "audio/webm";
-      if (state.recordChunks.length) {
-        blob = new Blob(state.recordChunks, { type: mime });
-      } else if (state.recordBlob) {
-        blob = state.recordBlob;
-      }
-    }
-
-    state.mediaRecorder = null;
-    state.recordChunks = [];
-    state.recordBlob = null;
-    state.recordMode = null;
-    state.wavFallback = null;
-    state.recordingActive = false;
-    state.recordReady = false;
-    state.recordStream = null;
-    // keep state.micStream alive — no re-prompt next time
-
-    return { blob, duration, mime };
-  }
-
   function stopRecording(discard) {
-    // cancel without send
     state.holdRecording = false;
     state.recordPointerId = null;
-    if (!state.recordingActive && !state.mediaRecorder && !state.wavFallback) {
-      hideRecordUI();
-      return;
-    }
-    state.recordingActive = false;
-    if (state.wavFallback) {
-      try {
-        finishWavFallback();
-      } catch {}
-    }
-    const rec = state.mediaRecorder;
-    if (rec && rec.state !== "inactive") {
-      try {
-        rec.stop();
-      } catch {}
-    }
+    unbindHoldWindow();
+    stopPcmCapture(true);
     state.mediaRecorder = null;
     state.recordChunks = [];
     state.recordBlob = null;
-    state.recordMode = null;
-    state.wavFallback = null;
-    state.recordReady = false;
     state.recordStream = null;
     hideRecordUI();
-    if (discard) {
-      /* noop — already cleared */
-    }
   }
 
   async function sendVoiceBlob(blob, duration) {
     if (!state.peer || !blob) return;
-    let out = blob;
-    try {
-      out = await ensurePlayableVoiceBlob(blob);
-    } catch (_) {}
-
-    // after convert, size can change
-    if (!out || out.size < 80) {
-      toast("Слишком короткая запись — удерживайте дольше");
+    // already WAV — skip heavy convert
+    const out = blob;
+    if (!out || out.size < 44 + 16) {
+      toast("Слишком короткая запись");
       return;
     }
 
-    const type = (out.type || "").toLowerCase();
-    const ext = type.includes("wav")
-      ? "wav"
-      : type.includes("mp4") || type.includes("aac") || type.includes("m4a")
-        ? "m4a"
-        : type.includes("mpeg") || type.includes("mp3")
-          ? "mp3"
-          : type.includes("ogg")
-            ? "ogg"
-            : type.includes("webm")
-              ? "webm"
-              : "wav";
-
     const fd = new FormData();
-    fd.append("file", out, `voice.${ext}`);
-    fd.append("duration", String(Math.round(duration * 10) / 10));
+    fd.append("file", out, "voice.wav");
+    fd.append("duration", String(Math.max(0.5, Math.round(duration * 10) / 10)));
 
     const url = state.isGroup
       ? `/api/groups/${state.peer.id}/voice`
@@ -1949,31 +1899,31 @@
 
   async function finishHoldRecording(forceSend) {
     if (state.sendingVoice) return;
-    if (!state.recordingActive && !state.mediaRecorder && !state.wavFallback) {
+    unbindHoldWindow();
+    state.holdRecording = false;
+    state.recordPointerId = null;
+
+    if (!state.recordingActive && !state.wavFallback) {
       hideRecordUI();
       return;
     }
 
-    state.holdRecording = false;
-    state.recordPointerId = null;
     state.sendingVoice = true;
+    // keep capturing a tiny bit more so last buffer flushes
+    await new Promise((r) => setTimeout(r, 80));
+    const duration = Math.max(0, (Date.now() - state.recordStart) / 1000);
+    const blob = stopPcmCapture(false);
     hideRecordUI();
 
     try {
-      // tiny wait so at least one timeslice of MediaRecorder arrives
-      const elapsed = (Date.now() - state.recordStart) / 1000;
-      if (elapsed < 0.15) {
-        await new Promise((r) => setTimeout(r, Math.ceil((0.15 - elapsed) * 1000)));
-      }
-
-      const { blob, duration } = await collectRecordedBlob();
-
       if (!forceSend && duration < MIN_VOICE_SEC) {
-        toast("Удерживайте кнопку дольше");
+        toast("Минимум 0.5 сек — удерживайте чуть дольше");
         return;
       }
-      if (!blob || blob.size < 80) {
-        toast("Слишком короткая запись — удерживайте дольше");
+      if (!blob || blob.size < 44 + 160) {
+        // 160 samples @16kHz ≈ 10ms — truly empty
+        console.warn("voice empty", { duration, size: blob && blob.size });
+        toast("Не удалось записать звук. Зажмите микрофон и говорите");
         return;
       }
       await sendVoiceBlob(blob, duration);
@@ -1986,7 +1936,6 @@
     }
   }
 
-  // legacy name used elsewhere
   async function sendVoiceRecording() {
     await finishHoldRecording(true);
   }
@@ -1999,75 +1948,42 @@
 
     const onDown = async (e) => {
       if (e.button != null && e.button !== 0) return;
-      if (!state.peer || state.sendingVoice || starting) return;
+      if (!state.peer || state.sendingVoice || starting || state.recordingActive) return;
       e.preventDefault();
       e.stopPropagation();
-      try {
-        btn.setPointerCapture(e.pointerId);
-      } catch {}
+
+      // Unlock audio SYNCHRONOUSLY in the gesture
+      unlockAudioContext();
+
       state.recordPointerId = e.pointerId;
       state.holdRecording = true;
+      bindHoldWindow();
+
       starting = true;
       const ok = await startRecording();
       starting = false;
+
       if (!ok) {
         state.holdRecording = false;
         state.recordPointerId = null;
-        try {
-          btn.releasePointerCapture(e.pointerId);
-        } catch {}
+        unbindHoldWindow();
         return;
       }
-      // Finger released while permission dialog / start was in progress
+
+      // Released during permission dialog / first setup
       if (!state.holdRecording) {
-        // First-time grant: don't auto-send empty; just cancel quietly
         const elapsed = (Date.now() - state.recordStart) / 1000;
         if (elapsed < MIN_VOICE_SEC) {
           stopRecording(true);
-          toast("Ещё раз: зажмите микрофон и говорите, отпустите — отправится", 4000);
+          toast("Разрешение получено. Зажмите микрофон ещё раз и говорите", 4000);
         } else {
           await finishHoldRecording(false);
         }
       }
     };
 
-    const onUp = async (e) => {
-      if (state.recordPointerId != null && e.pointerId !== state.recordPointerId) return;
-      e.preventDefault();
-      state.holdRecording = false;
-      try {
-        if (e.pointerId != null) btn.releasePointerCapture(e.pointerId);
-      } catch {}
-      state.recordPointerId = null;
-      // Still waiting for getUserMedia — onDown will finish/cancel
-      if (starting || state.sendingVoice) return;
-      if (!state.recordingActive && !state.mediaRecorder && !state.wavFallback) return;
-      await finishHoldRecording(false);
-    };
-
-    const onCancel = (e) => {
-      if (state.recordPointerId != null && e.pointerId !== state.recordPointerId) return;
-      state.holdRecording = false;
-      state.recordPointerId = null;
-      if (starting) return;
-      if (state.recordingActive || state.mediaRecorder || state.wavFallback) {
-        stopRecording(true);
-      }
-    };
-
     btn.addEventListener("pointerdown", onDown);
-    btn.addEventListener("pointerup", onUp);
-    btn.addEventListener("pointercancel", onCancel);
-    btn.addEventListener("lostpointercapture", () => {
-      if (starting) {
-        state.holdRecording = false;
-        return;
-      }
-      if (state.holdRecording && (state.recordingActive || state.mediaRecorder || state.wavFallback)) {
-        state.holdRecording = false;
-        finishHoldRecording(false);
-      }
-    });
+    // pointerup is on window (bindHoldWindow) so hiding UI can't steal the release
     btn.addEventListener(
       "contextmenu",
       (e) => {
