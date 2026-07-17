@@ -42,6 +42,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Request,
     Response,
     UploadFile,
     WebSocket,
@@ -1047,9 +1048,69 @@ async def get_avatar(filename: str):
     return Response(content=data, media_type=ctype)
 
 
+def _media_response(request: Request, data: bytes, media_type: str) -> Response:
+    """Serve bytes with HTTP Range — required for audio on iOS Safari."""
+    size = len(data)
+    ctype = media_type or "application/octet-stream"
+    base_headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=86400",
+        "Content-Type": ctype,
+    }
+    range_header = (request.headers.get("range") or "").strip()
+    if not range_header.startswith("bytes="):
+        return Response(
+            content=data,
+            media_type=ctype,
+            headers={**base_headers, "Content-Length": str(size)},
+        )
+    # bytes=start-end
+    try:
+        spec = range_header[6:].split(",")[0].strip()
+        start_s, _, end_s = spec.partition("-")
+        if start_s == "":
+            # suffix: bytes=-N
+            length = int(end_s)
+            start = max(0, size - length)
+            end = size - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s else size - 1
+        if start < 0 or start >= size:
+            return Response(
+                status_code=416,
+                headers={**base_headers, "Content-Range": f"bytes */{size}"},
+            )
+        end = min(end, size - 1)
+        if end < start:
+            return Response(
+                status_code=416,
+                headers={**base_headers, "Content-Range": f"bytes */{size}"},
+            )
+        chunk = data[start : end + 1]
+        return Response(
+            content=chunk,
+            status_code=206,
+            media_type=ctype,
+            headers={
+                **base_headers,
+                "Content-Length": str(len(chunk)),
+                "Content-Range": f"bytes {start}-{end}/{size}",
+            },
+        )
+    except (ValueError, IndexError):
+        return Response(
+            content=data,
+            media_type=ctype,
+            headers={**base_headers, "Content-Length": str(size)},
+        )
+
+
 @app.get("/api/voice/{filename}")
-async def get_voice(filename: str):
+async def get_voice(filename: str, request: Request):
     safe = Path(filename).name
+    if not safe or safe != filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Bad filename")
     path = VOICE / safe
     media_map = {
         ".webm": "audio/webm",
@@ -1058,15 +1119,18 @@ async def get_voice(filename: str):
         ".mp3": "audio/mpeg",
         ".wav": "audio/wav",
     }
-    if path.exists() and path.is_file():
-        return FileResponse(
-            path, media_type=media_map.get(path.suffix.lower(), "application/octet-stream")
-        )
+    # Prefer DB (survives Render disk wipe); fall back to local file
     stored = await load_media(safe, DB_PATH)
-    if not stored:
-        raise HTTPException(status_code=404)
-    data, ctype = stored
-    return Response(content=data, media_type=ctype)
+    if stored:
+        data, ctype = stored
+        if not ctype or ctype == "application/octet-stream":
+            ctype = media_map.get(path.suffix.lower(), ctype or "application/octet-stream")
+        return _media_response(request, data, ctype)
+    if path.exists() and path.is_file():
+        data = path.read_bytes()
+        ctype = media_map.get(path.suffix.lower(), "application/octet-stream")
+        return _media_response(request, data, ctype)
+    raise HTTPException(status_code=404, detail="Голосовое не найдено")
 
 
 # ── users & contacts ────────────────────────────────────────────

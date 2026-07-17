@@ -1293,50 +1293,206 @@
     }
   }
 
+  function resetAllVoicePlayIcons() {
+    document.querySelectorAll(".voice-play .ico-play").forEach((i) => i.classList.remove("hidden"));
+    document.querySelectorAll(".voice-play .ico-pause").forEach((i) => i.classList.add("hidden"));
+  }
+
+  async function loadVoiceBlobUrl(src) {
+    // Fetch whole file → blob URL. More reliable than streaming on iOS PWA.
+    const headers = {};
+    if (state.token) headers.Authorization = `Bearer ${state.token}`;
+    const res = await fetch(src, { credentials: "include", headers, cache: "force-cache" });
+    if (!res.ok) {
+      const err = new Error(res.status === 404 ? "Файл голосового не найден" : "Не удалось загрузить аудио");
+      err.status = res.status;
+      throw err;
+    }
+    const blob = await res.blob();
+    if (!blob || blob.size < 50) throw new Error("Пустой аудиофайл");
+    // Ensure browser gets a playable type hint
+    let type = blob.type || "";
+    if (!type || type === "application/octet-stream") {
+      const lower = (src || "").toLowerCase();
+      if (lower.endsWith(".wav")) type = "audio/wav";
+      else if (lower.endsWith(".m4a") || lower.endsWith(".mp4")) type = "audio/mp4";
+      else if (lower.endsWith(".mp3")) type = "audio/mpeg";
+      else if (lower.endsWith(".ogg")) type = "audio/ogg";
+      else if (lower.endsWith(".webm")) type = "audio/webm";
+    }
+    const typed =
+      type && blob.type !== type ? new Blob([blob], { type }) : blob;
+    return URL.createObjectURL(typed);
+  }
+
+  function canPlayLikely(src) {
+    // iOS Safari cannot play webm/ogg from Chrome/Android
+    const lower = (src || "").toLowerCase();
+    const a = document.createElement("audio");
+    if (lower.endsWith(".webm")) {
+      return a.canPlayType("audio/webm") || a.canPlayType('audio/webm; codecs="opus"');
+    }
+    if (lower.endsWith(".ogg")) {
+      return a.canPlayType("audio/ogg") || a.canPlayType('audio/ogg; codecs="opus"');
+    }
+    return true;
+  }
+
   function bindVoicePlayers(root) {
     root.querySelectorAll(".voice-msg").forEach((el) => {
+      if (el._voiceBound) return;
+      el._voiceBound = true;
       const btn = el.querySelector(".voice-play");
       const bar = el.querySelector(".voice-bar > i");
       const durEl = el.querySelector(".voice-dur");
       const src = el.dataset.src;
       const total = parseFloat(el.dataset.dur) || 0;
       let audio = null;
+      let objectUrl = null;
+      let loading = false;
 
-      btn.addEventListener("click", () => {
+      const setPlayingUi = (playing) => {
+        btn.querySelector(".ico-play").classList.toggle("hidden", playing);
+        btn.querySelector(".ico-pause").classList.toggle("hidden", !playing);
+      };
+
+      const stopUi = () => {
+        if (bar) bar.style.width = "0%";
+        if (durEl) durEl.textContent = formatDuration(total || (audio && audio.duration) || 0);
+        setPlayingUi(false);
+        if (state.playingAudio === audio) state.playingAudio = null;
+      };
+
+      btn.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (loading) return;
+
         if (state.playingAudio && state.playingAudio !== audio) {
-          state.playingAudio.pause();
-          document.querySelectorAll(".voice-play .ico-play").forEach((i) => i.classList.remove("hidden"));
-          document.querySelectorAll(".voice-play .ico-pause").forEach((i) => i.classList.add("hidden"));
+          try {
+            state.playingAudio.pause();
+          } catch {}
+          resetAllVoicePlayIcons();
         }
-        if (!audio) {
-          audio = new Audio(src);
-          audio.preload = "metadata";
-          audio.addEventListener("timeupdate", () => {
-            const t = audio.duration || total || 1;
-            bar.style.width = `${(audio.currentTime / t) * 100}%`;
-            durEl.textContent = formatDuration(audio.currentTime);
-          });
-          audio.addEventListener("ended", () => {
-            bar.style.width = "0%";
-            durEl.textContent = formatDuration(total || audio.duration || 0);
-            btn.querySelector(".ico-play").classList.remove("hidden");
-            btn.querySelector(".ico-pause").classList.add("hidden");
-            state.playingAudio = null;
-          });
-        }
-        if (audio.paused) {
-          audio.play().catch(() => toast("Не удалось воспроизвести"));
-          state.playingAudio = audio;
-          btn.querySelector(".ico-play").classList.add("hidden");
-          btn.querySelector(".ico-pause").classList.remove("hidden");
-        } else {
+
+        // toggle pause
+        if (audio && !audio.paused) {
           audio.pause();
-          btn.querySelector(".ico-play").classList.remove("hidden");
-          btn.querySelector(".ico-pause").classList.add("hidden");
+          setPlayingUi(false);
           state.playingAudio = null;
+          return;
+        }
+
+        if (!src) {
+          toast("Нет файла голосового");
+          return;
+        }
+
+        if (!canPlayLikely(src)) {
+          toast("Этот формат аудио iPhone не умеет — попросите перезаписать", 4500);
+          return;
+        }
+
+        try {
+          if (!audio) {
+            loading = true;
+            btn.disabled = true;
+            objectUrl = await loadVoiceBlobUrl(src);
+            audio = new Audio();
+            audio.preload = "auto";
+            audio.setAttribute("playsinline", "true");
+            audio.setAttribute("webkit-playsinline", "true");
+            audio.src = objectUrl;
+
+            audio.addEventListener("timeupdate", () => {
+              const t = audio.duration || total || 1;
+              if (bar && Number.isFinite(t) && t > 0) {
+                bar.style.width = `${Math.min(100, (audio.currentTime / t) * 100)}%`;
+              }
+              if (durEl) durEl.textContent = formatDuration(audio.currentTime);
+            });
+            audio.addEventListener("ended", stopUi);
+            audio.addEventListener("error", () => {
+              const code = audio.error && audio.error.code;
+              toast(
+                code === 4
+                  ? "Формат аудио не поддерживается на этом устройстве"
+                  : "Ошибка воспроизведения",
+                4000
+              );
+              stopUi();
+            });
+          }
+
+          await audio.play();
+          state.playingAudio = audio;
+          setPlayingUi(true);
+        } catch (err) {
+          console.error("voice play", err);
+          toast(err.message || "Не удалось воспроизвести", 4000);
+          stopUi();
+        } finally {
+          loading = false;
+          btn.disabled = false;
         }
       });
     });
+  }
+
+  function downsampleMono(samples, fromRate, toRate) {
+    if (fromRate === toRate) return samples;
+    const ratio = fromRate / toRate;
+    const newLen = Math.max(1, Math.round(samples.length / ratio));
+    const out = new Float32Array(newLen);
+    for (let i = 0; i < newLen; i++) {
+      const pos = i * ratio;
+      const i0 = Math.floor(pos);
+      const i1 = Math.min(i0 + 1, samples.length - 1);
+      const f = pos - i0;
+      out[i] = samples[i0] * (1 - f) + samples[i1] * f;
+    }
+    return out;
+  }
+
+  async function ensurePlayableVoiceBlob(blob) {
+    // Convert webm/ogg/etc → WAV so iPhone and PC can both play
+    if (!blob) return blob;
+    const type = (blob.type || "").toLowerCase();
+    if (type.includes("wav")) return blob;
+    // already m4a/mp4/aac — iOS and most desktop play fine
+    if (type.includes("mp4") || type.includes("m4a") || type.includes("aac") || type.includes("mpeg")) {
+      return blob;
+    }
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return blob;
+      const ctx = new AudioCtx();
+      try {
+        const ab = await blob.arrayBuffer();
+        // copy buffer — decodeAudioData may detach
+        const copy = ab.slice(0);
+        const decoded = await ctx.decodeAudioData(copy);
+        const ch0 = decoded.getChannelData(0);
+        let samples;
+        if (decoded.numberOfChannels > 1) {
+          const ch1 = decoded.getChannelData(1);
+          samples = new Float32Array(ch0.length);
+          for (let i = 0; i < ch0.length; i++) samples[i] = (ch0[i] + ch1[i]) * 0.5;
+        } else {
+          samples = new Float32Array(ch0);
+        }
+        const targetRate = 16000;
+        samples = downsampleMono(samples, decoded.sampleRate || 44100, targetRate);
+        return encodeWav(samples, targetRate);
+      } finally {
+        try {
+          await ctx.close();
+        } catch {}
+      }
+    } catch (e) {
+      console.warn("voice convert failed, sending original", e);
+      return blob;
+    }
   }
 
   async function sendMessage() {
@@ -1661,17 +1817,25 @@
       return;
     }
 
+    // webm from Chrome → convert to WAV so iPhone can play
+    try {
+      toast("Отправка…", 1500);
+      blob = await ensurePlayableVoiceBlob(blob);
+    } catch (_) {}
+
     const fd = new FormData();
-    const type = blob.type || "";
+    const type = (blob.type || "").toLowerCase();
     const ext = type.includes("wav")
       ? "wav"
       : type.includes("mp4") || type.includes("aac") || type.includes("m4a")
         ? "m4a"
-        : type.includes("ogg")
-          ? "ogg"
-          : type.includes("webm")
-            ? "webm"
-            : "wav";
+        : type.includes("mpeg") || type.includes("mp3")
+          ? "mp3"
+          : type.includes("ogg")
+            ? "ogg"
+            : type.includes("webm")
+              ? "webm"
+              : "wav";
     fd.append("file", blob, `voice.${ext}`);
     fd.append("duration", String(Math.round(duration * 10) / 10));
 
@@ -1684,9 +1848,18 @@
         method: "POST",
         headers: { Authorization: `Bearer ${state.token}` },
         body: fd,
+        credentials: "include",
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Ошибка отправки");
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = {};
+      }
+      if (!res.ok) {
+        const d = data && data.detail;
+        throw new Error(typeof d === "string" ? d : "Ошибка отправки");
+      }
       if (!state.messages.some((m) => m.id === data.id)) {
         state.messages.push(data);
         renderMessages(true);
