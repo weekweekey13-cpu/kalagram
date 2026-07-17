@@ -1246,6 +1246,17 @@
           m.msg_type === "voice" ? "🎤 Голосовое" : (m.text || "").slice(0, 60);
         toast(`${name}: ${preview}`);
       }
+      // Local notification if app not visible (fallback when remote push fails)
+      if (m.sender_id !== state.me?.id && (document.hidden || document.visibilityState !== "visible")) {
+        const name = data.sender?.display_name || data.sender?.nick || "Калаграм";
+        const preview =
+          m.msg_type === "voice" ? "🎤 Голосовое" : (m.text || "Новое сообщение").slice(0, 80);
+        showLocalMessageNotification(name, preview, {
+          peer_id: m.group_id || m.sender_id,
+          group_id: m.group_id,
+          is_group: !!m.group_id,
+        });
+      }
     } else if (data.type === "presence") {
       updatePresence(data.user_id, data.online, data.last_seen);
     } else if (data.type === "typing") {
