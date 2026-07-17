@@ -93,8 +93,13 @@
       data = await res.text();
     }
     if (!res.ok) {
-      const detail = (data && data.detail) || "Ошибка запроса";
-      const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      let detail = (data && data.detail) || "Ошибка запроса";
+      if (Array.isArray(detail)) {
+        detail = detail.map((x) => x.msg || x.message || JSON.stringify(x)).join("; ");
+      } else if (detail && typeof detail === "object") {
+        detail = detail.msg || detail.message || JSON.stringify(detail);
+      }
+      const err = new Error(typeof detail === "string" ? detail : String(detail));
       err.status = res.status;
       throw err;
     }

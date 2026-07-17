@@ -224,6 +224,58 @@ def clear_auth(response: Response) -> None:
 async def init_db() -> None:
     await init_pool()
     await init_schema(DB_PATH)
+    # ensure push tables exist even if DB was created before this feature
+    try:
+        async with connect(DB_PATH) as db:
+            if USE_PG:
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS push_subscriptions (
+                        endpoint TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        p256dh TEXT NOT NULL,
+                        auth TEXT NOT NULL,
+                        created_at DOUBLE PRECISION NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS app_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id)"
+                )
+            else:
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS push_subscriptions (
+                        endpoint TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        p256dh TEXT NOT NULL,
+                        auth TEXT NOT NULL,
+                        created_at REAL NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS app_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id)"
+                )
+                await db.commit()
+    except Exception as e:
+        print("  push tables ensure failed:", e)
     mode = "PostgreSQL (постоянно)" if USE_PG else "SQLite (локально / временный диск)"
     print(f"  БД: {mode}")
 
@@ -704,45 +756,73 @@ async def push_unsubscribe(body: PushSubIn, user: dict = Depends(get_current_use
     return {"ok": True}
 
 
-@app.get("/api/push/status")
-async def push_status(user: dict = Depends(get_current_user)):
+def _row_count(row) -> int:
+    if not row:
+        return 0
+    try:
+        return int(row["c"])
+    except Exception:
+        try:
+            return int(row[0])
+        except Exception:
+            return 0
+
+
+async def _count_push_subs(user_id: int) -> int:
     async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT COUNT(*) AS c FROM push_subscriptions WHERE user_id = ?",
-            (user["id"],),
+            (user_id,),
         )
-        row = await cur.fetchone()
-        count = int(row["c"] if row and "c" in row.keys() else (row[0] if row else 0))
-    return {
-        "subscriptions": count,
-        "publicKeyPrefix": (vapid_public_key() or "")[:16],
-        "ok": count > 0,
-    }
+        return _row_count(await cur.fetchone())
+
+
+@app.get("/api/push/status")
+async def push_status(user: dict = Depends(get_current_user)):
+    try:
+        count = await _count_push_subs(user["id"])
+        pub = ""
+        try:
+            pub = (vapid_public_key() or "")[:16]
+        except Exception:
+            pub = ""
+        return {
+            "subscriptions": count,
+            "publicKeyPrefix": pub,
+            "ok": count > 0,
+        }
+    except Exception as e:
+        print("push_status error", e)
+        raise HTTPException(status_code=500, detail=f"push status: {e}")
 
 
 @app.post("/api/push/test")
 async def push_test(user: dict = Depends(get_current_user)):
     """Send a test notification to the current user's devices."""
-    await push_notify_users(
-        [user["id"]],
-        "Калаграм",
-        "Тест: уведомления работают ✓",
-        {"test": True},
-    )
-    async with connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT COUNT(*) AS c FROM push_subscriptions WHERE user_id = ?",
-            (user["id"],),
+    try:
+        count = await _count_push_subs(user["id"])
+    except Exception as e:
+        print("push_test count error", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка БД подписок: {e}. Обновите сайт и снова «Включить уведомления».",
         )
-        row = await cur.fetchone()
-        count = int(row["c"] if row and "c" in row.keys() else (row[0] if row else 0))
     if count == 0:
         raise HTTPException(
             status_code=400,
-            detail="Подписка не найдена. Нажмите «Включить уведомления» ещё раз (с иконки на Домой).",
+            detail="Подписка не найдена. Откройте Калаграм с «Домой» → Профиль → Включить уведомления.",
         )
+    try:
+        await push_notify_users(
+            [user["id"]],
+            "Калаграм",
+            "Тест: уведомления работают ✓",
+            {"test": True},
+        )
+    except Exception as e:
+        print("push_test send error", e)
+        raise HTTPException(status_code=500, detail=f"Не удалось отправить push: {e}")
     return {"ok": True, "subscriptions": count}
 
 
