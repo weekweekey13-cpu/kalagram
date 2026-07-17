@@ -1549,11 +1549,12 @@ async def get_messages(
 
 @app.post("/api/messages/bulk-delete")
 async def delete_messages(body: DeleteMessagesIn, user: dict = Depends(get_current_user)):
-    """Delete own messages (for everyone in the chat/group)."""
+    """Delete messages for everyone (any message in chats you're part of)."""
     ids = [int(i) for i in body.ids if int(i) > 0]
     if not ids:
         raise HTTPException(status_code=400, detail="Нечего удалять")
     placeholders = ",".join("?" * len(ids))
+    uid = int(user["id"])
     async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -1561,44 +1562,105 @@ async def delete_messages(body: DeleteMessagesIn, user: dict = Depends(get_curre
             tuple(ids),
         )
         rows = await cur.fetchall()
-        allowed = []
+        allowed: list[int] = []
         peers: set[int] = set()
         groups: set[int] = set()
         for r in rows:
-            if int(r["sender_id"]) != int(user["id"]):
-                continue
-            allowed.append(int(r["id"]))
-            if r["group_id"]:
-                groups.add(int(r["group_id"]))
+            mid = int(r["id"])
+            gid = r["group_id"]
+            sid = int(r["sender_id"])
+            rid = int(r["receiver_id"] or 0)
+            if gid:
+                # must be group member
+                ok = await is_group_member(int(gid), uid)
+                if not ok:
+                    continue
+                allowed.append(mid)
+                groups.add(int(gid))
             else:
-                rid = r["receiver_id"]
-                if rid and int(rid) not in (0, user["id"]):
-                    peers.add(int(rid))
-                peers.add(int(user["id"]))
+                # DM: user must be sender or receiver
+                if uid not in (sid, rid):
+                    continue
+                allowed.append(mid)
+                peers.add(sid)
+                if rid:
+                    peers.add(rid)
         if not allowed:
-            raise HTTPException(status_code=400, detail="Можно удалять только свои сообщения")
+            raise HTTPException(status_code=400, detail="Нет доступа к этим сообщениям")
         ph2 = ",".join("?" * len(allowed))
-        await db.execute(
-            f"DELETE FROM messages WHERE id IN ({ph2}) AND sender_id = ?",
-            tuple(allowed) + (user["id"],),
-        )
+        await db.execute(f"DELETE FROM messages WHERE id IN ({ph2})", tuple(allowed))
         await db.commit()
 
-    # notify all involved clients
-    event = {
-        "type": "messages_deleted",
-        "ids": allowed,
-        "by": user["id"],
-    }
+    event = {"type": "messages_deleted", "ids": allowed, "by": uid}
     targets: set[int] = set(peers)
-    for gid in groups:
-        for mid in await get_group_member_ids(gid):
+    for g in groups:
+        for mid in await get_group_member_ids(g):
             targets.add(mid)
-    if not targets:
-        targets.add(user["id"])
+    targets.add(uid)
     for tid in targets:
         await manager.send_to(tid, event)
     return {"ok": True, "deleted": allowed}
+
+
+class DeleteChatsIn(BaseModel):
+    items: list[dict[str, Any]] = Field(..., min_length=1, max_length=50)
+
+
+@app.post("/api/chats/bulk-delete")
+async def delete_chats(body: DeleteChatsIn, user: dict = Depends(get_current_user)):
+    """Delete entire chats for everyone (all messages in DM/group)."""
+    uid = int(user["id"])
+    deleted_dms: list[int] = []
+    deleted_groups: list[int] = []
+    targets: set[int] = {uid}
+
+    for item in body.items:
+        kind = (item.get("kind") or item.get("type") or "dm").lower()
+        cid = int(item.get("id") or 0)
+        if cid <= 0:
+            continue
+        if kind == "group":
+            if not await is_group_member(cid, uid):
+                continue
+            members = await get_group_member_ids(cid)
+            targets.update(members)
+            async with connect(DB_PATH) as db:
+                await db.execute("DELETE FROM messages WHERE group_id = ?", (cid,))
+                await db.execute("DELETE FROM group_reads WHERE group_id = ?", (cid,))
+                await db.execute("DELETE FROM group_members WHERE group_id = ?", (cid,))
+                await db.execute("DELETE FROM chat_groups WHERE id = ?", (cid,))
+                await db.commit()
+            deleted_groups.append(cid)
+        else:
+            # DM with peer cid
+            peer = await db_get_user(cid)
+            if not peer:
+                continue
+            targets.add(cid)
+            async with connect(DB_PATH) as db:
+                await db.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE group_id IS NULL
+                      AND (
+                        (sender_id = ? AND receiver_id = ?)
+                        OR (sender_id = ? AND receiver_id = ?)
+                      )
+                    """,
+                    (uid, cid, cid, uid),
+                )
+                await db.commit()
+            deleted_dms.append(cid)
+
+    event = {
+        "type": "chats_deleted",
+        "dms": deleted_dms,
+        "groups": deleted_groups,
+        "by": uid,
+    }
+    for tid in targets:
+        await manager.send_to(tid, event)
+    return {"ok": True, "dms": deleted_dms, "groups": deleted_groups}
 
 
 @app.post("/api/messages/{peer_id}")
