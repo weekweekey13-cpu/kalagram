@@ -406,7 +406,7 @@ async def get_group_info(group_id: int) -> dict[str, Any] | None:
 async def save_voice_file(content: bytes, content_type: str | None, user_id: int) -> str:
     if len(content) > MAX_VOICE:
         raise HTTPException(status_code=400, detail="Голосовое больше 6 МБ")
-    if len(content) < 100:
+    if len(content) < 60:
         raise HTTPException(status_code=400, detail="Слишком короткое голосовое")
     ctype = (content_type or "").lower()
     if "webm" in ctype:
