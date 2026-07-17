@@ -636,6 +636,137 @@ img { display: block; max-width: 100%; }
   border-bottom-left-radius: 6px;
 }
 
+/* ── Message selection / delete ───────────── */
+.messages.select-mode {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.bubble {
+  cursor: default;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.bubble.mine-selectable {
+  cursor: pointer;
+}
+
+.messages.select-mode .bubble.mine-selectable {
+  padding-left: 36px;
+}
+
+.bubble .sel-check {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%) scale(0.85);
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  background: rgba(0, 0, 0, 0.15);
+  opacity: 0;
+  pointer-events: none;
+  transition: 0.15s ease;
+  display: grid;
+  place-items: center;
+}
+
+.bubble.them .sel-check {
+  border-color: rgba(255, 255, 255, 0.25);
+  left: auto;
+  right: -28px;
+}
+
+.messages.select-mode .bubble.mine-selectable .sel-check {
+  opacity: 1;
+  left: 6px;
+}
+
+.bubble.selected {
+  box-shadow: 0 0 0 2px rgba(138, 164, 255, 0.85);
+  transform: scale(0.99);
+}
+
+.bubble.selected .sel-check {
+  opacity: 1 !important;
+  background: linear-gradient(135deg, #5b7cfa, #7b5cff);
+  border-color: transparent;
+}
+
+.bubble.selected .sel-check::after {
+  content: "";
+  width: 5px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.messages.select-mode .bubble:not(.mine-selectable) {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.select-topbar {
+  background: rgba(18, 21, 28, 0.95) !important;
+  gap: 10px;
+}
+
+.select-title {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 4px;
+}
+
+.select-title .name {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.select-title .status {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.btn-delete-sel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 107, 122, 0.15);
+  color: var(--danger);
+  font-weight: 700;
+  font-size: 0.9rem;
+  transition: 0.15s ease;
+  flex-shrink: 0;
+}
+
+.btn-delete-sel:not(:disabled):active {
+  transform: scale(0.97);
+  background: rgba(255, 107, 122, 0.28);
+}
+
+.btn-delete-sel:disabled {
+  opacity: 0.35;
+}
+
+.composer.select-hidden {
+  opacity: 0.35;
+  pointer-events: none;
+  filter: grayscale(0.3);
+}
+
+/* long-press feedback */
+.bubble.pressing {
+  transform: scale(0.97);
+  opacity: 0.9;
+}
+
 .bubble .text {
   font-size: 0.98rem;
   line-height: 1.4;

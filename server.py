@@ -131,6 +131,10 @@ class MessageIn(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000)
 
 
+class DeleteMessagesIn(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=100)
+
+
 class ProfileIn(BaseModel):
     display_name: str | None = Field(None, max_length=48)
 
@@ -1541,6 +1545,60 @@ async def get_messages(
         },
         "messages": [msg_dict(r) for r in rows],
     }
+
+
+@app.post("/api/messages/bulk-delete")
+async def delete_messages(body: DeleteMessagesIn, user: dict = Depends(get_current_user)):
+    """Delete own messages (for everyone in the chat/group)."""
+    ids = [int(i) for i in body.ids if int(i) > 0]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Нечего удалять")
+    placeholders = ",".join("?" * len(ids))
+    async with connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            f"SELECT id, sender_id, receiver_id, group_id FROM messages WHERE id IN ({placeholders})",
+            tuple(ids),
+        )
+        rows = await cur.fetchall()
+        allowed = []
+        peers: set[int] = set()
+        groups: set[int] = set()
+        for r in rows:
+            if int(r["sender_id"]) != int(user["id"]):
+                continue
+            allowed.append(int(r["id"]))
+            if r["group_id"]:
+                groups.add(int(r["group_id"]))
+            else:
+                rid = r["receiver_id"]
+                if rid and int(rid) not in (0, user["id"]):
+                    peers.add(int(rid))
+                peers.add(int(user["id"]))
+        if not allowed:
+            raise HTTPException(status_code=400, detail="Можно удалять только свои сообщения")
+        ph2 = ",".join("?" * len(allowed))
+        await db.execute(
+            f"DELETE FROM messages WHERE id IN ({ph2}) AND sender_id = ?",
+            tuple(allowed) + (user["id"],),
+        )
+        await db.commit()
+
+    # notify all involved clients
+    event = {
+        "type": "messages_deleted",
+        "ids": allowed,
+        "by": user["id"],
+    }
+    targets: set[int] = set(peers)
+    for gid in groups:
+        for mid in await get_group_member_ids(gid):
+            targets.add(mid)
+    if not targets:
+        targets.add(user["id"])
+    for tid in targets:
+        await manager.send_to(tid, event)
+    return {"ok": True, "deleted": allowed}
 
 
 @app.post("/api/messages/{peer_id}")

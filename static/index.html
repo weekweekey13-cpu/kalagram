@@ -20,7 +20,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png" />
   <title>Калаграм</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=8" />
+  <link rel="stylesheet" href="/static/css/style.css?v=9" />
 </head>
 <body>
   <div id="app">
@@ -131,7 +131,7 @@
 
       <!-- CHAT -->
       <div id="panel-chat" class="panel panel-chat hidden">
-        <header class="topbar chat-topbar">
+        <header class="topbar chat-topbar" id="chat-topbar-normal">
           <button type="button" class="icon-btn" id="btn-back-chats" aria-label="Назад">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
@@ -143,6 +143,20 @@
             </div>
           </button>
           <div class="topbar-actions"></div>
+        </header>
+        <!-- Selection mode toolbar (long-press messages) -->
+        <header class="topbar select-topbar hidden" id="chat-topbar-select">
+          <button type="button" class="icon-btn" id="btn-select-cancel" aria-label="Отмена">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+          <div class="select-title">
+            <div class="name" id="select-count">Выбрано: 0</div>
+            <div class="status">Только свои сообщения</div>
+          </div>
+          <button type="button" class="btn-delete-sel" id="btn-select-delete" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+            <span>Удалить</span>
+          </button>
         </header>
         <div id="messages" class="messages scroll"></div>
         <div class="composer safe-bottom">
@@ -247,6 +261,6 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status"></div>
-  <script src="/static/js/app.js?v=8"></script>
+  <script src="/static/js/app.js?v=9"></script>
 </body>
 </html>

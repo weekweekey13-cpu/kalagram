@@ -54,6 +54,9 @@
     peer: null, // user or group object
     isGroup: false,
     messages: [],
+    selectMode: false,
+    selectedIds: new Set(),
+    longPressTimer: null,
     ws: null,
     typingTimer: null,
     peerTypingTimer: null,
@@ -694,6 +697,7 @@
   // ── Chat ─────────────────────────────────
   async function openChat(peerId) {
     stopRecording(true);
+    exitSelectMode();
     state.isGroup = false;
     showPanel("chat");
     const box = $("#messages");
@@ -718,6 +722,7 @@
 
   async function openGroupChat(groupId) {
     stopRecording(true);
+    exitSelectMode();
     state.isGroup = true;
     showPanel("chat");
     const box = $("#messages");
@@ -749,6 +754,171 @@
     setAvatar($("#peer-avatar"), p, { isGroup: p.is_group });
   }
 
+  function exitSelectMode() {
+    state.selectMode = false;
+    state.selectedIds = new Set();
+    clearTimeout(state.longPressTimer);
+    state.longPressTimer = null;
+    $("#chat-topbar-normal")?.classList.remove("hidden");
+    $("#chat-topbar-select")?.classList.add("hidden");
+    $("#messages")?.classList.remove("select-mode");
+    $(".composer")?.classList.remove("select-hidden");
+    updateSelectUi();
+    // clear selected classes without full re-render if possible
+    $$("#messages .bubble.selected").forEach((b) => b.classList.remove("selected"));
+  }
+
+  function enterSelectMode(firstId) {
+    state.selectMode = true;
+    state.selectedIds = new Set();
+    if (firstId) state.selectedIds.add(Number(firstId));
+    $("#chat-topbar-normal")?.classList.add("hidden");
+    $("#chat-topbar-select")?.classList.remove("hidden");
+    $("#messages")?.classList.add("select-mode");
+    $(".composer")?.classList.add("select-hidden");
+    updateSelectUi();
+    // mark selected in DOM
+    $$("#messages .bubble").forEach((b) => {
+      const id = Number(b.dataset.id);
+      b.classList.toggle("selected", state.selectedIds.has(id));
+    });
+    if (navigator.vibrate) try { navigator.vibrate(30); } catch (_) {}
+  }
+
+  function updateSelectUi() {
+    const n = state.selectedIds.size;
+    const countEl = $("#select-count");
+    const delBtn = $("#btn-select-delete");
+    if (countEl) countEl.textContent = n ? `Выбрано: ${n}` : "Выберите сообщения";
+    if (delBtn) delBtn.disabled = n === 0;
+  }
+
+  function toggleSelectMessage(id) {
+    id = Number(id);
+    const m = state.messages.find((x) => Number(x.id) === id);
+    if (!m || m.sender_id !== state.me.id || m.msg_type === "system") {
+      toast("Можно выделять только свои сообщения");
+      return;
+    }
+    if (state.selectedIds.has(id)) state.selectedIds.delete(id);
+    else state.selectedIds.add(id);
+    const el = $(`#messages .bubble[data-id="${id}"]`);
+    if (el) el.classList.toggle("selected", state.selectedIds.has(id));
+    updateSelectUi();
+    if (state.selectedIds.size === 0) {
+      // stay in select mode until cancel
+    }
+  }
+
+  async function deleteSelectedMessages() {
+    const ids = [...state.selectedIds];
+    if (!ids.length) return;
+    if (!confirm(ids.length === 1 ? "Удалить сообщение?" : `Удалить сообщения: ${ids.length}?`)) {
+      return;
+    }
+    try {
+      const res = await api("/api/messages/bulk-delete", {
+        method: "POST",
+        json: { ids },
+      });
+      const deleted = new Set(res.deleted || ids);
+      state.messages = state.messages.filter((m) => !deleted.has(Number(m.id)));
+      exitSelectMode();
+      renderMessages(false);
+      loadChats().catch(() => {});
+      toast(deleted.size === 1 ? "Сообщение удалено" : `Удалено: ${deleted.size}`);
+    } catch (err) {
+      toast(err.message || "Не удалось удалить");
+    }
+  }
+
+  function bindMessageInteractions(box) {
+    if (!box || box._selBound) return;
+    box._selBound = true;
+
+    let pressId = null;
+    let startX = 0;
+    let startY = 0;
+    let moved = false;
+
+    const clearPress = () => {
+      clearTimeout(state.longPressTimer);
+      state.longPressTimer = null;
+      $$("#messages .bubble.pressing").forEach((b) => b.classList.remove("pressing"));
+      pressId = null;
+    };
+
+    box.addEventListener(
+      "pointerdown",
+      (e) => {
+        const bubble = e.target.closest(".bubble");
+        if (!bubble || bubble.classList.contains("system")) return;
+        // don't start long-press on voice play button
+        if (e.target.closest(".voice-play")) return;
+        const id = Number(bubble.dataset.id);
+        const m = state.messages.find((x) => Number(x.id) === id);
+        if (!m) return;
+
+        if (state.selectMode) {
+          e.preventDefault();
+          if (m.sender_id === state.me.id) toggleSelectMessage(id);
+          return;
+        }
+
+        // only long-press own messages to start selection
+        if (m.sender_id !== state.me.id) return;
+
+        pressId = id;
+        moved = false;
+        startX = e.clientX;
+        startY = e.clientY;
+        bubble.classList.add("pressing");
+        clearTimeout(state.longPressTimer);
+        state.longPressTimer = setTimeout(() => {
+          bubble.classList.remove("pressing");
+          enterSelectMode(id);
+          pressId = null;
+        }, 480);
+      },
+      { passive: true }
+    );
+
+    box.addEventListener(
+      "pointermove",
+      (e) => {
+        if (!pressId) return;
+        if (Math.abs(e.clientX - startX) > 12 || Math.abs(e.clientY - startY) > 12) {
+          moved = true;
+          clearPress();
+        }
+      },
+      { passive: true }
+    );
+
+    box.addEventListener("pointerup", () => {
+      if (pressId && !state.selectMode && !moved) {
+        // short tap — do nothing special
+      }
+      clearPress();
+    });
+    box.addEventListener("pointercancel", clearPress);
+    box.addEventListener("pointerleave", (e) => {
+      if (e.target === box) clearPress();
+    });
+
+    // Desktop: right-click own message to enter select
+    box.addEventListener("contextmenu", (e) => {
+      const bubble = e.target.closest(".bubble");
+      if (!bubble || bubble.classList.contains("system")) return;
+      const id = Number(bubble.dataset.id);
+      const m = state.messages.find((x) => Number(x.id) === id);
+      if (!m || m.sender_id !== state.me.id) return;
+      e.preventDefault();
+      if (!state.selectMode) enterSelectMode(id);
+      else toggleSelectMessage(id);
+    });
+  }
+
   function renderMessages(scrollBottom = false) {
     const box = $("#messages");
     if (!box) return;
@@ -767,6 +937,7 @@
         continue;
       }
       const mine = m.sender_id === state.me.id;
+      const selected = state.selectMode && state.selectedIds.has(Number(m.id));
       const senderName =
         state.isGroup && !mine
           ? m.sender?.display_name || m.sender?.nick || ""
@@ -788,7 +959,8 @@
         body = `<div class="text">${escapeHtml(m.text)}</div>`;
       }
       html += `
-        <div class="bubble ${mine ? "me" : "them"}" data-id="${m.id}">
+        <div class="bubble ${mine ? "me mine-selectable" : "them"} ${selected ? "selected" : ""}" data-id="${m.id}">
+          ${mine ? '<span class="sel-check" aria-hidden="true"></span>' : ""}
           ${senderName ? `<div class="bubble-sender">${escapeHtml(senderName)}</div>` : ""}
           ${body}
           <div class="meta">
@@ -799,6 +971,8 @@
     }
     box.innerHTML = html;
     bindVoicePlayers(box);
+    bindMessageInteractions(box);
+    box.classList.toggle("select-mode", !!state.selectMode);
     if (scrollBottom) {
       box.scrollTop = box.scrollHeight;
     } else {
@@ -1304,6 +1478,14 @@
           is_group: !!m.group_id,
         });
       }
+    } else if (data.type === "messages_deleted") {
+      const ids = new Set((data.ids || []).map(Number));
+      if (!ids.size) return;
+      state.messages = state.messages.filter((m) => !ids.has(Number(m.id)));
+      ids.forEach((id) => state.selectedIds.delete(id));
+      if (state.selectMode) updateSelectUi();
+      renderMessages(false);
+      loadChats().catch(() => {});
     } else if (data.type === "presence") {
       updatePresence(data.user_id, data.online, data.last_seen);
     } else if (data.type === "typing") {
