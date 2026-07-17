@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Выложить Калаграм бесплатно</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; background:#0b0d12; color:#f2f4f8;
+      max-width: 640px; margin: 0 auto; padding: 24px; line-height: 1.5; }
+    h1 { font-size: 1.5rem; }
+    .card { background:#12151c; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:18px; margin:16px 0; }
+    a.btn { display:block; text-align:center; background:linear-gradient(135deg,#5b7cfa,#7b5cff);
+      color:#fff; text-decoration:none; padding:14px; border-radius:12px; font-weight:700; margin:10px 0; }
+    a.btn2 { background:#1e2430; }
+    ol { color:#9aa3b5; padding-left:1.3rem; }
+    li { margin: 8px 0; }
+    strong { color:#fff; }
+    code { color:#8aa4ff; background:#1a1f2b; padding:2px 6px; border-radius:6px; }
+    .note { color:#6b7385; font-size:.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Калаграм в интернете 24/7 (бесплатно)</h1>
+  <p>Чтобы сайт работал <strong>без вашего компьютера</strong>, его нужно разместить на бесплатном хостинге <strong>Render</strong>. Нужны 2 бесплатных аккаунта (Google/GitHub — по кнопке).</p>
+
+  <div class="card">
+    <h2 style="margin-top:0;font-size:1.1rem">Шаг 1 — GitHub (хранилище кода)</h2>
+    <ol>
+      <li>Откройте кнопку ниже → зарегистрируйтесь (можно через Google)</li>
+      <li><strong>New repository</strong> → имя: <code>kalagram</code> → <strong>Create</strong> (без README)</li>
+      <li>Запомните адрес репозитория (типа <code>github.com/ВАШ_НИК/kalagram</code>)</li>
+    </ol>
+    <a class="btn" href="https://github.com/signup" target="_blank" rel="noopener">1. Зарегистрироваться на GitHub</a>
+    <a class="btn btn2" href="https://github.com/new" target="_blank" rel="noopener">2. Создать репозиторий kalagram</a>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0;font-size:1.1rem">Шаг 2 — Загрузить код Калаграма</h2>
+    <ol>
+      <li>Дважды щёлкните файл <code>ЗАГРУЗИТЬ НА GITHUB.bat</code> в папке «Сайт»</li>
+      <li>Вставьте URL репозитория, когда спросит (пример: <code>https://github.com/ВАШ_НИК/kalagram.git</code>)</li>
+      <li>Войдите в GitHub, если попросит (логин/пароль или token)</li>
+    </ol>
+    <p class="note">Если bat не сработает — напишите мне, загрузим вместе.</p>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0;font-size:1.1rem">Шаг 3 — Render (бесплатный сервер + HTTPS)</h2>
+    <ol>
+      <li>Регистрация на Render (через GitHub — удобнее)</li>
+      <li><strong>New +</strong> → <strong>Web Service</strong></li>
+      <li>Подключите репозиторий <code>kalagram</code></li>
+      <li>Настройки:
+        <ul>
+          <li>Language: <strong>Python 3</strong></li>
+          <li>Build: <code>pip install -r requirements.txt</code></li>
+          <li>Start: <code>python server.py</code></li>
+          <li>Instance: <strong>Free</strong></li>
+        </ul>
+      </li>
+      <li>Environment variables (Add):
+        <ul>
+          <li><code>MESSENGER_CLOUD</code> = <code>1</code></li>
+          <li><code>USE_HTTP</code> = <code>1</code></li>
+          <li><code>MESSENGER_SECRET</code> = любая длинная фраза</li>
+        </ul>
+      </li>
+      <li><strong>Create Web Service</strong> → подождите 3–5 минут</li>
+      <li>Скопируйте ссылку <code>https://kalagram-xxxx.onrender.com</code> — это и есть Калаграм в сети</li>
+    </ol>
+    <a class="btn" href="https://dashboard.render.com/register" target="_blank" rel="noopener">3. Зарегистрироваться на Render</a>
+    <a class="btn btn2" href="https://dashboard.render.com/select-repo?type=web" target="_blank" rel="noopener">4. Создать Web Service</a>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0;font-size:1.1rem">Готово</h2>
+    <p>Раздайте ссылку <code>https://….onrender.com</code> друзьям. Компьютер можно выключать.</p>
+    <p class="note">На free-плане Render «засыпает» после ~15 мин без визитов — первый заход может занять 30–60 сек. Это ограничение бесплатного тарифа.</p>
+  </div>
+</body>
+</html>

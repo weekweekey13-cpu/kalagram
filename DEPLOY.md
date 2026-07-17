@@ -1,74 +1,43 @@
-# Деплой мессенджера (бесплатно + нормальный HTTPS)
+# Калаграм в интернете 24/7 (бесплатно, без вашего ПК)
 
-На хостинге **нет** предупреждения «подключение не защищено» — сертификат выдаёт платформа (Let's Encrypt).
+Полностью «без аккаунта» бесплатный сервер в сети **нельзя** создать: у хостинга должна быть ваша регистрация.  
+Ниже — самый простой бесплатный путь (**Render** + **GitHub**).
 
-## Вариант 1 — Render (проще всего)
+## За 10 минут
 
-1. Зарегистрируйтесь: https://render.com (через Google/GitHub)
-2. Загрузите проект на GitHub (или выберите «Deploy from public Git»)
-3. **Dashboard → New → Blueprint** → укажите репозиторий с `render.yaml`  
-   **или** **New → Web Service** → подключите репо:
-   - **Build:** `pip install -r requirements.txt`
-   - **Start:** `python server.py`
-   - **Plan:** Free
+### 1. GitHub
+1. https://github.com/signup  
+2. https://github.com/new → имя `kalagram` → Create (Public, **без** README)
+
+### 2. Залить код
+Запустите **`ЗАГРУЗИТЬ НА GITHUB.bat`** в папке «Сайт»  
+и вставьте URL: `https://github.com/ВАШ_НИК/kalagram.git`
+
+Если спросит пароль — сделайте token:  
+https://github.com/settings/tokens → classic → галочка **repo** → вставьте token как пароль.
+
+### 3. Render
+1. https://dashboard.render.com/register (удобно через GitHub)  
+2. **New +** → **Web Service** → репозиторий `kalagram`  
+3. Настройки:
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `python server.py`
+   - **Instance type:** Free  
 4. Environment:
    - `MESSENGER_CLOUD` = `1`
    - `USE_HTTP` = `1`
-   - `MESSENGER_SECRET` = любая длинная случайная строка
-5. Deploy → через 2–5 минут будет ссылка вида  
-   `https://messenger-xxxx.onrender.com`
+   - `MESSENGER_SECRET` = любая длинная случайная строка  
+5. **Create Web Service** → 3–5 минут  
+6. Ссылка вида **`https://kalagram-xxxx.onrender.com`** — готово.
 
-**Минусы free:** после ~15 мин без визитов сервис «засыпает» (первый заход ~30–60 сек).  
-**Данные** на free-диске могут сбрасываться при пересборке — важные чаты лучше не считать вечными без платного диска.
+Компьютер можно выключать. Раздайте ссылку друзьям.
 
-## Вариант 2 — Fly.io (лучше для данных)
+## Важно про Free
+- После ~15 минут без визитов сервис «спит» — первый заход 30–60 секунд.
+- Данные SQLite на free могут пропасть при пересборке. Для важных чатов позже можно добавить диск/БД.
 
-```bash
-fly auth login
-fly launch --copy-config
-fly volumes create messenger_data --size 1 --region fra
-fly secrets set MESSENGER_SECRET="ваша-длинная-строка"
-fly deploy
-```
+## Альтернативы
+- **Fly.io** — `flyctl launch` + volume (см. `fly.toml`)
+- **Railway** — deploy from GitHub
 
-HTTPS: `https://имя-приложения.fly.dev`
-
-## Вариант 3 — Railway
-
-1. https://railway.app → New Project → Deploy from GitHub  
-2. Root = папка с `server.py`  
-3. Variables: `MESSENGER_CLOUD=1`, `USE_HTTP=1`, `MESSENGER_SECRET=...`  
-4. Generate Domain → HTTPS готов
-
-## Локально + бесплатный HTTPS-туннель (ПК должен быть включён)
-
-```bash
-# сервер
-python server.py
-
-# в другом окне (cloudflared)
-cloudflared tunnel --url http://127.0.0.1:8000
-```
-
-Получите ссылку `https://….trycloudflare.com` с **настоящим** сертификатом.  
-Работает, пока запущены сервер и туннель на вашем компьютере.
-
-## Docker (VPS / любой хостинг)
-
-```bash
-docker build -t messenger .
-docker run -d -p 8000:8000 \
-  -e MESSENGER_CLOUD=1 \
-  -e MESSENGER_SECRET=длинный-секрет \
-  -v messenger_data:/data \
-  messenger
-```
-
-Перед nginx/Caddy: проксируйте на `127.0.0.1:8000`, включите WebSocket, SSL на прокси.
-
-## После деплоя
-
-1. Откройте `https://ваш-адрес`  
-2. Зарегистрируйтесь (ник + пароль)  
-3. На iPhone: Safari → Поделиться → На экран «Домой»  
-4. Раздайте ссылку друзьям
+Или откройте **`ВЫЛОЖИТЬ В ИНТЕРНЕТ.bat`** — инструкция с кнопками.

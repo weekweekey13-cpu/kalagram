@@ -14,3 +14,8 @@ data/
 .env
 .env.*
 !.env.example
+
+TOKEN.txt
+токен.txt
+*token*
+
