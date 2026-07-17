@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0b0d12" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Калаграм" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="format-detection" content="telephone=no" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/static/icons/icon-180.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
+  <title>Калаграм</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- AUTH -->
+    <section id="view-auth" class="view view-auth hidden">
+      <div class="auth-bg"></div>
+      <div class="auth-card">
+        <div class="auth-logo">
+          <div class="logo-orb"></div>
+          <h1>Калаграм</h1>
+          <p class="auth-sub">Свой мессенджер. Вошли — и остаётесь.</p>
+        </div>
+        <div class="auth-tabs">
+          <button type="button" class="auth-tab active" data-tab="login">Вход</button>
+          <button type="button" class="auth-tab" data-tab="register">Регистрация</button>
+        </div>
+        <form id="form-login" class="auth-form" autocomplete="on">
+          <label class="field">
+            <span>Ник</span>
+            <input name="nick" type="text" inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="ваш_ник" required maxlength="24" />
+          </label>
+          <label class="field">
+            <span>Пароль</span>
+            <input name="password" type="password" placeholder="••••••••" required minlength="4" maxlength="72" autocomplete="current-password" />
+          </label>
+          <p class="form-error" id="login-error" hidden></p>
+          <button type="submit" class="btn btn-primary btn-block">Войти</button>
+        </form>
+        <form id="form-register" class="auth-form hidden" autocomplete="on">
+          <label class="field">
+            <span>Ник</span>
+            <input name="nick" type="text" inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="новый_ник" required minlength="2" maxlength="24" />
+          </label>
+          <label class="field">
+            <span>Пароль</span>
+            <input name="password" type="password" placeholder="минимум 4 символа" required minlength="4" maxlength="72" autocomplete="new-password" />
+          </label>
+          <p class="hint">Ник: буквы, цифры, _ - . (2–24)</p>
+          <p class="form-error" id="register-error" hidden></p>
+          <button type="submit" class="btn btn-primary btn-block">Создать аккаунт</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- MAIN SHELL -->
+    <section id="view-main" class="view view-main hidden">
+      <!-- CHATS LIST -->
+      <div id="panel-chats" class="panel panel-list">
+        <header class="topbar">
+          <div class="topbar-title">
+            <h1>Чаты</h1>
+          </div>
+          <div class="topbar-actions">
+            <button type="button" class="icon-btn" id="btn-open-group" aria-label="Новая группа" title="Группа">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/><path d="M19 8v6M22 11h-6"/></svg>
+            </button>
+            <button type="button" class="icon-btn" id="btn-open-search" aria-label="Найти людей" title="Найти">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+            </button>
+            <button type="button" class="icon-btn" id="btn-open-profile" aria-label="Профиль">
+              <div class="avatar avatar-sm" id="me-avatar-btn"></div>
+            </button>
+          </div>
+        </header>
+        <div class="search-bar">
+          <svg class="search-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+          <input type="search" id="chats-filter" placeholder="Поиск чатов" enterkeyhint="search" />
+        </div>
+        <div id="chats-list" class="list scroll"></div>
+        <nav class="tabbar">
+          <button type="button" class="tab active" data-panel="chats">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a8.5 8.5 0 01-8.5 8.5H6l-3 2.5V12A8.5 8.5 0 0112 3.5h.5A8.5 8.5 0 0121 12z"/></svg>
+            <span>Чаты</span>
+          </button>
+          <button type="button" class="tab" data-panel="contacts">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+            <span>Контакты</span>
+          </button>
+        </nav>
+      </div>
+
+      <!-- CONTACTS -->
+      <div id="panel-contacts" class="panel panel-list hidden">
+        <header class="topbar">
+          <div class="topbar-title"><h1>Контакты</h1></div>
+          <div class="topbar-actions">
+            <button type="button" class="icon-btn" id="btn-open-search-2" aria-label="Найти">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+            </button>
+          </div>
+        </header>
+        <div class="search-bar">
+          <svg class="search-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+          <input type="search" id="contacts-filter" placeholder="Фильтр контактов" />
+        </div>
+        <div id="contacts-list" class="list scroll"></div>
+        <nav class="tabbar">
+          <button type="button" class="tab" data-panel="chats">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a8.5 8.5 0 01-8.5 8.5H6l-3 2.5V12A8.5 8.5 0 0112 3.5h.5A8.5 8.5 0 0121 12z"/></svg>
+            <span>Чаты</span>
+          </button>
+          <button type="button" class="tab active" data-panel="contacts">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+            <span>Контакты</span>
+          </button>
+        </nav>
+      </div>
+
+      <!-- CHAT -->
+      <div id="panel-chat" class="panel panel-chat hidden">
+        <header class="topbar chat-topbar">
+          <button type="button" class="icon-btn" id="btn-back-chats" aria-label="Назад">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <button type="button" class="chat-peer" id="btn-peer-info">
+            <div class="avatar avatar-sm" id="peer-avatar"></div>
+            <div class="chat-peer-meta">
+              <div class="name" id="peer-name">—</div>
+              <div class="status" id="peer-status">офлайн</div>
+            </div>
+          </button>
+          <div class="topbar-actions"></div>
+        </header>
+        <div id="messages" class="messages scroll"></div>
+        <div class="composer safe-bottom">
+          <div id="record-bar" class="record-bar hidden">
+            <button type="button" class="icon-btn rec-cancel" id="btn-rec-cancel" aria-label="Отмена">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+            <div class="rec-wave">
+              <span class="rec-dot"></span>
+              <span id="rec-time">0:00</span>
+            </div>
+            <button type="button" class="send-btn" id="btn-rec-send" aria-label="Отправить голосовое">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+          </div>
+          <div class="composer-inner" id="composer-main">
+            <textarea id="msg-input" rows="1" placeholder="Сообщение" enterkeyhint="send" maxlength="4000"></textarea>
+            <button type="button" class="send-btn" id="btn-send" aria-label="Отправить" disabled>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+            <button type="button" class="mic-btn" id="btn-mic" aria-label="Голосовое">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><path d="M12 19v4M8 23h8"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- CREATE GROUP -->
+      <div id="panel-group" class="panel panel-overlay hidden">
+        <header class="topbar">
+          <button type="button" class="icon-btn" id="btn-close-group" aria-label="Закрыть">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <div class="topbar-title"><h1>Новая группа</h1></div>
+        </header>
+        <div class="group-create scroll">
+          <label class="field">
+            <span>Название</span>
+            <input type="text" id="group-name" maxlength="64" placeholder="Например: Друзья" />
+          </label>
+          <p class="group-pick-label">Участники</p>
+          <div id="group-members-list" class="list group-members"></div>
+          <button type="button" class="btn btn-primary btn-block" id="btn-create-group" disabled>Создать группу</button>
+        </div>
+      </div>
+
+      <!-- SEARCH PEOPLE -->
+      <div id="panel-search" class="panel panel-overlay hidden">
+        <header class="topbar">
+          <button type="button" class="icon-btn" id="btn-close-search" aria-label="Закрыть">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <div class="topbar-title"><h1>Найти людей</h1></div>
+        </header>
+        <div class="search-bar elevated">
+          <svg class="search-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+          <input type="search" id="people-search" placeholder="Введите ник или имя" autofocus />
+        </div>
+        <div id="people-results" class="list scroll"></div>
+      </div>
+
+      <!-- PROFILE -->
+      <div id="panel-profile" class="panel panel-overlay hidden">
+        <header class="topbar">
+          <button type="button" class="icon-btn" id="btn-close-profile" aria-label="Закрыть">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <div class="topbar-title"><h1>Профиль</h1></div>
+        </header>
+        <div class="profile scroll">
+          <div class="profile-hero">
+            <button type="button" class="avatar avatar-xl profile-avatar" id="profile-avatar" aria-label="Сменить аватар"></button>
+            <input type="file" id="avatar-input" accept="image/jpeg,image/png,image/webp,image/gif" hidden />
+            <p class="profile-hint">Нажмите на фото, чтобы сменить</p>
+            <h2 id="profile-display"></h2>
+            <p class="profile-nick" id="profile-nick"></p>
+          </div>
+          <label class="field profile-field">
+            <span>Отображаемое имя</span>
+            <input type="text" id="profile-name-input" maxlength="48" placeholder="Как вас видеть" />
+          </label>
+          <button type="button" class="btn btn-primary btn-block" id="btn-save-profile">Сохранить</button>
+          <button type="button" class="btn btn-ghost btn-block danger" id="btn-logout">Выйти</button>
+          <div class="install-card" id="install-card">
+            <h3>На главный экран iPhone</h3>
+            <ol>
+              <li>Нажмите <strong>Поделиться</strong> <span class="ios-share">⎙</span> в Safari</li>
+              <li>Выберите <strong>«На экран „Домой“»</strong></li>
+              <li>Нажмите <strong>Добавить</strong></li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

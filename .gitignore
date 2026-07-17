@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+data/
+!data/.gitkeep
+*.db
+.secret
+.DS_Store
+.idea/
+.vscode/
+*.log
+.env
+.env.*
+!.env.example

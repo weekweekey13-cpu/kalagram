@@ -1,0 +1,20 @@
+# Render Blueprint — бесплатный веб-сервис с настоящим HTTPS
+# Dashboard → New → Blueprint → этот репозиторий
+services:
+  - type: web
+    name: kalagram
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /
+    envVars:
+      - key: MESSENGER_CLOUD
+        value: "1"
+      - key: USE_HTTP
+        value: "1"
+      - key: MESSENGER_SECRET
+        generateValue: true
+      - key: DATA_DIR
+        value: /opt/render/project/src/data

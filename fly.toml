@@ -1,0 +1,32 @@
+# Fly.io — бесплатный лимит + постоянный диск
+# Установка: https://fly.io/docs/hands-on/install-flyctl/
+# Деплой: fly launch --copy-config --now
+
+app = "kalagram"
+primary_region = "fra"
+
+[build]
+
+[env]
+  MESSENGER_CLOUD = "1"
+  USE_HTTP = "1"
+  DATA_DIR = "/data"
+  HOST = "0.0.0.0"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "messenger_data"
+  destination = "/data"
