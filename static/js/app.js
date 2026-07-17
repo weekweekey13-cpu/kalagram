@@ -2099,16 +2099,16 @@
       return false;
     }
     if (Voice.phase === "recording") {
-      // second tap on mic while recording → send
       return voiceFinish(true);
     }
     if (Voice.phase === "sending" || Voice.phase === "stopping") {
       toast("Секунду…");
       return false;
     }
+    // Permission dialog open / getUserMedia in progress — do NOT reset
     if (Voice.phase === "starting") {
-      // stuck? force free and retry
-      voiceHardReset();
+      toast("Разрешите микрофон, если спросит…", 2500);
+      return false;
     }
 
     const block = micBlockReason();
@@ -2119,26 +2119,28 @@
 
     const myGen = ++Voice.gen;
     Voice.phase = "starting";
-    toast("Микрофон…", 1500);
+    toast("Микрофон…", 2000);
 
-    // Sync unlock in gesture
     const ctx = voiceUnlockCtx();
 
     try {
       const stream = await withTimeout(
         voiceGetStream(),
-        8000,
+        10000,
         "Нет ответа микрофона. Настройки → Калаграм → Микрофон → Вкл"
       );
       if (myGen !== Voice.gen) return false;
 
-      // Soft resume, never hang
       if (ctx && ctx.state === "suspended") {
         try {
-          await withTimeout(ctx.resume(), 400, "resume");
+          await withTimeout(
+            Promise.resolve(ctx.resume()).catch(() => {}),
+            300,
+            "resume"
+          );
         } catch {}
       }
-      await voiceSleep(60);
+      await voiceSleep(40);
       if (myGen !== Voice.gen) return false;
 
       Voice.chunks = [];
@@ -2148,7 +2150,6 @@
 
       let ok = false;
 
-      // MediaRecorder
       if (typeof MediaRecorder !== "undefined") {
         try {
           const mime = pickRecorderMime();
@@ -2160,7 +2161,6 @@
           rec.ondataavailable = (e) => {
             if (e.data && e.data.size > 0) Voice.chunks.push(e.data);
           };
-          // iOS: no timeslice (empty chunks bug)
           if (isIOSDevice()) rec.start();
           else {
             try {
@@ -2177,7 +2177,6 @@
         }
       }
 
-      // PCM backup
       if (ctx) {
         try {
           startPcm(stream, ctx);
@@ -2186,6 +2185,8 @@
           console.warn("PCM fail", e);
         }
       }
+
+      if (myGen !== Voice.gen) return false;
 
       if (!ok) {
         Voice.phase = "idle";
@@ -2201,6 +2202,8 @@
       if (myGen !== Voice.gen) return false;
       console.error(err);
       Voice.phase = "idle";
+      Voice.rec = null;
+      state.mediaRecorder = null;
       hideRecordUI();
       const name = err && err.name;
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
@@ -2211,6 +2214,12 @@
         toast((err && err.message) || "Ошибка микрофона", 4500);
       }
       return false;
+    } finally {
+      // Never stay stuck in "starting"
+      if (myGen === Voice.gen && Voice.phase === "starting") {
+        Voice.phase = "idle";
+        hideRecordUI();
+      }
     }
   }
 
