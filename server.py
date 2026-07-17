@@ -757,10 +757,17 @@ async def push_subscribe(body: PushSubIn, user: dict = Depends(get_current_user)
 @app.delete("/api/push/subscribe")
 async def push_unsubscribe(body: PushSubIn, user: dict = Depends(get_current_user)):
     async with connect(DB_PATH) as db:
-        await db.execute(
-            "DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?",
-            (body.endpoint, user["id"]),
-        )
+        # allow delete by endpoint only for this user (keys may be dummy)
+        if body.endpoint:
+            await db.execute(
+                "DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?",
+                (body.endpoint, user["id"]),
+            )
+        else:
+            await db.execute(
+                "DELETE FROM push_subscriptions WHERE user_id = ?",
+                (user["id"],),
+            )
         await db.commit()
     return {"ok": True}
 

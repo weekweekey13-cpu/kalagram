@@ -1631,20 +1631,25 @@
       if (!publicKey) throw new Error("Нет ключа push на сервере");
 
       // if server keys rotated — drop old subscription
-      const prevKey = localStorage.getItem("kalagram_vapid_pub");
+      // Always resubscribe — avoids Apple err 400 VapidPkHashMismatch
       let sub = await reg.pushManager.getSubscription();
-      if (sub && prevKey && prevKey !== publicKey) {
+      if (sub) {
         try {
+          await api("/api/push/subscribe", {
+            method: "DELETE",
+            json: {
+              endpoint: sub.endpoint,
+              keys: { p256dh: "x", auth: "x" },
+            },
+          }).catch(() => {});
           await sub.unsubscribe();
         } catch (_) {}
         sub = null;
       }
-      if (!sub) {
-        sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(publicKey),
-        });
-      }
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
       localStorage.setItem("kalagram_vapid_pub", publicKey);
 
       const json = sub.toJSON();
@@ -1694,18 +1699,23 @@
         toast("Сначала войдите");
         return;
       }
-      toast("Шлём тест с сервера… сверните Калаграм");
+      // ensure subscription is fresh before server test
+      await enablePushNotifications(false);
+      toast("Сверните Калаграм на Домой… шлём тест");
+      await new Promise((r) => setTimeout(r, 800));
       const r = await api("/api/push/test", { method: "POST" });
       toast(
-        "Сервер доставил: " +
-          (r.delivered || 0) +
-          " из " +
-          (r.subscriptions || 0) +
-          " — сверните приложение",
+        "Доставлено: " + (r.delivered || 0) + "/" + (r.subscriptions || 0),
         4000
       );
     } catch (err) {
-      toast(err.message || "Тест не прошёл", 5000);
+      const msg = err.message || "Тест не прошёл";
+      // friendlier for Apple 400
+      if (/400|Vapid|Mismatch/i.test(msg)) {
+        toast("Ключи сбились — снова «Включить уведомления», потом тест", 5000);
+      } else {
+        toast(msg, 5000);
+      }
     }
   }
 

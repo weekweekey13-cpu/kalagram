@@ -1,4 +1,4 @@
-"""Web Push (VAPID) — iOS/Android PWA. Uses py_vapid key format pywebpush expects."""
+"""Web Push (VAPID) for iOS/Android PWA — Apple-compatible."""
 
 from __future__ import annotations
 
@@ -19,8 +19,9 @@ DATA.mkdir(parents=True, exist_ok=True)
 
 VAPID_PRIV_FILE = DATA / "vapid_private.pem"
 VAPID_PUB_FILE = DATA / "vapid_public.b64"
+# Apple accepts mailto: or https: URL
 VAPID_EMAIL = os.environ.get(
-    "VAPID_MAILTO", "mailto:noreply@kalagram-z20h.onrender.com"
+    "VAPID_MAILTO", "mailto:noreply@kalagram.app"
 )
 
 _vapid: Vapid | None = None
@@ -41,38 +42,36 @@ def _pub_b64_from_vapid(v: Vapid) -> str:
 
 def _pem_str(v: Vapid) -> str:
     pem = v.private_pem()
-    if isinstance(pem, bytes):
-        return pem.decode("ascii")
-    return str(pem)
+    return pem.decode("ascii") if isinstance(pem, bytes) else str(pem)
 
 
 def set_vapid_from_pem(priv_pem: str, pub_b64: str | None = None) -> None:
     global _vapid, _public_b64
     pem = priv_pem.replace("\\n", "\n").strip()
-    if not pem.startswith("-----"):
-        # raw 32-byte key as b64
-        _vapid = Vapid.from_string(private_key=pem)
+    if pem.startswith("-----"):
+        _vapid = Vapid.from_pem(pem.encode("utf-8"))
     else:
-        _vapid = Vapid.from_pem(pem.encode("ascii") if isinstance(pem, str) else pem)
-    _public_b64 = pub_b64 or _pub_b64_from_vapid(_vapid)
+        # raw urlsafe base64 private scalar
+        _vapid = Vapid.from_string(private_key=pem)
+    # Always derive public from private so they match for Apple VapidPkHash
+    _public_b64 = _pub_b64_from_vapid(_vapid)
+    if pub_b64 and pub_b64.strip() != _public_b64:
+        print("  Push: WARNING stored public key mismatch — using derived from private")
 
 
 def ensure_vapid_keys() -> tuple[Any, str]:
-    """Return (Vapid instance, public_applicationServerKey_b64url)."""
     global _vapid, _public_b64
     if _vapid is not None and _public_b64:
         return _vapid, _public_b64
 
     env_priv = os.environ.get("VAPID_PRIVATE_KEY", "").strip()
-    env_pub = os.environ.get("VAPID_PUBLIC_KEY", "").strip()
     if env_priv:
-        set_vapid_from_pem(env_priv, env_pub or None)
+        set_vapid_from_pem(env_priv, os.environ.get("VAPID_PUBLIC_KEY"))
         return _vapid, _public_b64  # type: ignore
 
     if VAPID_PRIV_FILE.exists():
         pem = VAPID_PRIV_FILE.read_text(encoding="utf-8")
-        pub = VAPID_PUB_FILE.read_text(encoding="utf-8").strip() if VAPID_PUB_FILE.exists() else None
-        set_vapid_from_pem(pem, pub)
+        set_vapid_from_pem(pem)
         return _vapid, _public_b64  # type: ignore
 
     v = Vapid()
@@ -94,13 +93,12 @@ def public_key() -> str:
 
 
 async def ensure_vapid_keys_db(connect_fn, db_path) -> tuple[Any, str]:
-    """Load/save VAPID PEM in app_meta so keys survive Render restarts (Neon)."""
+    """Persist VAPID in Neon app_meta; always derive public from private."""
     global _vapid, _public_b64
 
     env_priv = os.environ.get("VAPID_PRIVATE_KEY", "").strip()
-    env_pub = os.environ.get("VAPID_PUBLIC_KEY", "").strip()
     if env_priv:
-        set_vapid_from_pem(env_priv, env_pub or None)
+        set_vapid_from_pem(env_priv, os.environ.get("VAPID_PUBLIC_KEY"))
         return _vapid, _public_b64  # type: ignore
 
     import aiosqlite
@@ -113,15 +111,29 @@ async def ensure_vapid_keys_db(connect_fn, db_path) -> tuple[Any, str]:
         rows = await cur.fetchall()
         meta = {r["key"]: r["value"] for r in rows}
         priv = meta.get("vapid_private") or ""
-        pub = meta.get("vapid_public") or ""
 
-        # Accept PEM or raw; regenerate if missing
-        if priv and pub and len(pub) >= 80:
+        if priv:
             try:
-                set_vapid_from_pem(priv, pub)
+                set_vapid_from_pem(priv, meta.get("vapid_public"))
+                # rewrite public if it was wrong
+                async def _upsert(k, val):
+                    if getattr(db, "pg", False):
+                        await db.execute(
+                            "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+                            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                            (k, val),
+                        )
+                    else:
+                        await db.execute("DELETE FROM app_meta WHERE key = ?", (k,))
+                        await db.execute(
+                            "INSERT INTO app_meta (key, value) VALUES (?, ?)", (k, val)
+                        )
+
+                await _upsert("vapid_public", _public_b64)
+                await db.commit()
                 return _vapid, _public_b64  # type: ignore
             except Exception as e:
-                print("  Push: stored VAPID invalid, regenerating:", e)
+                print("  Push: bad stored VAPID, regenerating:", e)
 
         v = Vapid()
         v.generate_keys()
@@ -145,49 +157,74 @@ async def ensure_vapid_keys_db(connect_fn, db_path) -> tuple[Any, str]:
                 await db.execute(
                     "INSERT INTO app_meta (key, value) VALUES (?, ?)", (k, val)
                 )
+        # Old device subscriptions used previous keys → wipe
+        try:
+            await db.execute("DELETE FROM push_subscriptions")
+        except Exception:
+            pass
         await db.commit()
         _vapid = v
         _public_b64 = pub
-        print("  Push: new VAPID keys saved — devices must re-enable notifications")
+        print("  Push: VAPID keys (re)generated — re-enable notifications on phones")
         return _vapid, _public_b64
+
+
+def _normalize_b64(s: str) -> str:
+    """Ensure urlsafe b64 without newlines; keep unpadded for web-push."""
+    s = (s or "").strip().replace("-", "+").replace("_", "/")
+    # don't convert — pywebpush accepts urlsafe; restore urlsafe
+    s = (s or "").strip().replace("+", "-").replace("/", "_").replace("\n", "")
+    return s.rstrip("=")
 
 
 def _send_one(subscription: dict[str, Any], payload: str) -> str:
     from pywebpush import WebPushException, webpush
 
-    vapid, _ = ensure_vapid_keys()
-    endpoint = str(subscription.get("endpoint", ""))[:60]
+    vapid, pub = ensure_vapid_keys()
+    # normalize keys from DB
+    keys = subscription.get("keys") or {}
+    sub = {
+        "endpoint": subscription["endpoint"],
+        "keys": {
+            "p256dh": _normalize_b64(keys.get("p256dh", "")),
+            "auth": _normalize_b64(keys.get("auth", "")),
+        },
+    }
+    endpoint = str(sub.get("endpoint", ""))[:70]
     try:
-        # claims: sub must be mailto: or https:
-        claims = {"sub": VAPID_EMAIL}
         resp = webpush(
-            subscription_info=subscription,
+            subscription_info=sub,
             data=payload,
-            vapid_private_key=vapid,  # Vapid instance
-            vapid_claims=claims,
+            vapid_private_key=vapid,
+            vapid_claims={
+                "sub": VAPID_EMAIL,
+            },
             ttl=86400,
             timeout=30.0,
-            verbose=True,
+            verbose=False,
             headers={"Urgency": "high"},
             content_encoding="aes128gcm",
         )
         code = getattr(resp, "status_code", None)
-        print(f"push OK status={code} ep={endpoint}")
+        print(f"push OK {code} {endpoint}")
         return "ok"
     except WebPushException as e:
         status = None
         body = ""
         try:
             status = e.response.status_code  # type: ignore[union-attr]
-            body = (e.response.text or "")[:400]  # type: ignore[union-attr]
+            body = (e.response.text or "")[:500]  # type: ignore[union-attr]
         except Exception:
-            pass
-        print(f"push FAIL status={status} ep={endpoint} err={e} body={body}")
+            body = str(e)
+        print(f"push FAIL {status} {endpoint} :: {body}")
         if status in (404, 410):
             return "gone"
+        # common apple: VapidPkHashMismatch when phone subscribed with other key
+        if body and "Vapid" in body or "vapid" in body.lower() or status == 400:
+            return f"err:{status or 400}:{body[:120] or e}"
         return f"err:{status or e}"
     except Exception as e:
-        print(f"push EXC ep={endpoint} {e}")
+        print(f"push EXC {endpoint} {e}")
         traceback.print_exc()
         return f"err:{e}"
 
@@ -200,8 +237,8 @@ async def send_web_push(
 ) -> str:
     payload = json.dumps(
         {
-            "title": (title or "Калаграм")[:80],
-            "body": (body or "Новое сообщение")[:200],
+            "title": (title or "Калаграм")[:64],
+            "body": (body or "Новое сообщение")[:180],
             "data": data or {},
             "icon": "/static/icons/icon-192.png",
             "badge": "/static/icons/icon-192.png",
