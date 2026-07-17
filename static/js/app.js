@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.17";
+  const APP_VERSION = "1.18";
   const APP_UPDATE_NOTES =
-    "Обнова 1.17 готова ✓\n• Голосовые пересобраны: без зависаний микрофона\n• 🎤 → говори → ✓";
+    "Обнова 1.18 готова ✓\n• Убран «Сброс… жмите ещё раз»\n• 🎤 → говори → ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -2399,21 +2399,19 @@
   let micBusy = false;
 
   function bindMicHold() {
+    // One global entry — HTML onclick only (no second click listener = no double fire)
     let lastAt = 0;
+    let inFlight = false;
 
     const activateMic = async () => {
       const now = Date.now();
-      if (now - lastAt < 350) return;
+      if (now - lastAt < 500) return;
       lastAt = now;
+      if (inFlight) return;
+      inFlight = true;
       try {
         if (!state.peer || state.systemChat) {
           toast("Сначала откройте чат с человеком");
-          return;
-        }
-        // If somehow stuck in starting > 0ms and user taps again — hard reset
-        if (Voice.phase === "starting") {
-          voiceHardReset();
-          toast("Сброс… жмите ещё раз");
           return;
         }
         voiceUnlockCtx();
@@ -2422,6 +2420,8 @@
         console.error("mic", err);
         voiceHardReset();
         toast((err && err.message) || "Ошибка записи");
+      } finally {
+        inFlight = false;
       }
     };
 
@@ -2437,12 +2437,7 @@
       voiceHardReset();
       toast("Отменено");
     };
-
-    const btn = document.getElementById("btn-mic");
-    if (btn && !btn._micWired) {
-      btn._micWired = true;
-      btn.addEventListener("click", () => activateMic());
-    }
+    // Do NOT addEventListener("click") — HTML already has onclick (double-fire caused «Сброс»)
   }
 
   // ── Profile ──────────────────────────────
