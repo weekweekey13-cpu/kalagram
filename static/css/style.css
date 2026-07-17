@@ -706,10 +706,7 @@ img { display: block; max-width: 100%; }
   transform: rotate(45deg) translate(-1px, -1px);
 }
 
-.messages.select-mode .bubble:not(.mine-selectable) {
-  opacity: 0.45;
-  pointer-events: none;
-}
+
 
 .select-topbar {
   background: rgba(18, 21, 28, 0.95) !important;
