@@ -512,8 +512,13 @@ async def push_notify_users(
             "keys": {"p256dh": r["p256dh"], "auth": r["auth"]},
         }
         result = await send_web_push(sub, title, body, data)
+        print(
+            f"push user={r['user_id']} result={result} endpoint={str(r['endpoint'])[:40]}"
+        )
         if result == "gone":
             gone.append(r["endpoint"])
+    if not rows:
+        print(f"push: no subscriptions for users {user_ids}")
     if gone:
         async with connect(DB_PATH) as db:
             for ep in gone:
@@ -697,6 +702,48 @@ async def push_unsubscribe(body: PushSubIn, user: dict = Depends(get_current_use
         )
         await db.commit()
     return {"ok": True}
+
+
+@app.get("/api/push/status")
+async def push_status(user: dict = Depends(get_current_user)):
+    async with connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT COUNT(*) AS c FROM push_subscriptions WHERE user_id = ?",
+            (user["id"],),
+        )
+        row = await cur.fetchone()
+        count = int(row["c"] if row and "c" in row.keys() else (row[0] if row else 0))
+    return {
+        "subscriptions": count,
+        "publicKeyPrefix": (vapid_public_key() or "")[:16],
+        "ok": count > 0,
+    }
+
+
+@app.post("/api/push/test")
+async def push_test(user: dict = Depends(get_current_user)):
+    """Send a test notification to the current user's devices."""
+    await push_notify_users(
+        [user["id"]],
+        "Калаграм",
+        "Тест: уведомления работают ✓",
+        {"test": True},
+    )
+    async with connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT COUNT(*) AS c FROM push_subscriptions WHERE user_id = ?",
+            (user["id"],),
+        )
+        row = await cur.fetchone()
+        count = int(row["c"] if row and "c" in row.keys() else (row[0] if row else 0))
+    if count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Подписка не найдена. Нажмите «Включить уведомления» ещё раз (с иконки на Домой).",
+        )
+    return {"ok": True, "subscriptions": count}
 
 
 # ── auth routes ─────────────────────────────────────────────────

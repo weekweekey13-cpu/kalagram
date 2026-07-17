@@ -1516,14 +1516,15 @@
     if (pushBtn) {
       pushBtn.addEventListener("click", () => enablePushNotifications(true));
     }
+    const testPushBtn = $("#btn-test-push");
+    if (testPushBtn) {
+      testPushBtn.addEventListener("click", () => testPushFromServer());
+    }
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
-        .register("/sw.js?v=4")
-        .then(() => {
-          // after login bootstrap may not have finished; try soft setup
-        })
-        .catch(() => {});
+        .register("/sw.js?v=5", { scope: "/" })
+        .catch((e) => console.warn("SW register", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
         const d = ev.data || {};
         if (d.type === "open-chat") {
@@ -1583,35 +1584,57 @@
         return;
       }
       if (!("Notification" in window) || !("PushManager" in window)) {
-        toast("Push не поддерживается");
+        toast("Push не поддерживается в этом браузере");
         return;
       }
-      if (!isStandalonePwa() && /iPhone|iPad|iPod/i.test(navigator.userAgent)) {
-        toast("На iPhone: откройте Калаграм с домашнего экрана", 4000);
+      const isiOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+      if (isiOS && !isStandalonePwa()) {
+        toast("Откройте Калаграм с иконки на Домой (не Safari)", 4500);
         updatePushStatus();
         if (!fromButton) return;
-        // still try — some versions allow
       }
-      const reg = await navigator.serviceWorker.ready;
+      // ensure SW controlling page
+      let reg = await navigator.serviceWorker.register("/sw.js?v=5", { scope: "/" });
+      reg = await navigator.serviceWorker.ready;
+      if (!navigator.serviceWorker.controller) {
+        // wait a bit for controller
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
       let perm = Notification.permission;
       if (perm !== "granted") {
         perm = await Notification.requestPermission();
       }
       if (perm !== "granted") {
-        toast("Нужно разрешить уведомления");
+        toast("Разрешите уведомления в окне iPhone");
         updatePushStatus();
         return;
       }
+
       const { publicKey } = await api("/api/push/vapid-public-key");
-      if (!publicKey) throw new Error("Нет ключа push");
+      if (!publicKey) throw new Error("Нет ключа push на сервере");
+
+      // if server keys rotated — drop old subscription
+      const prevKey = localStorage.getItem("kalagram_vapid_pub");
       let sub = await reg.pushManager.getSubscription();
+      if (sub && prevKey && prevKey !== publicKey) {
+        try {
+          await sub.unsubscribe();
+        } catch (_) {}
+        sub = null;
+      }
       if (!sub) {
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(publicKey),
         });
       }
+      localStorage.setItem("kalagram_vapid_pub", publicKey);
+
       const json = sub.toJSON();
+      if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
+        throw new Error("Подписка неполная — попробуйте ещё раз");
+      }
       await api("/api/push/subscribe", {
         method: "POST",
         json: {
@@ -1622,12 +1645,44 @@
           },
         },
       });
-      toast("Уведомления включены");
+
+      // verify server has it
+      const st = await api("/api/push/status");
+      if (!st.ok) {
+        throw new Error("Сервер не сохранил подписку");
+      }
+
+      toast("Уведомления включены ✓", 2500);
       updatePushStatus();
+
+      if (fromButton) {
+        // immediate local test (proves permission+SW; server push tested separately)
+        try {
+          await reg.showNotification("Калаграм", {
+            body: "Локальный тест — если это видно, разрешено",
+            icon: "/static/icons/icon-192.png",
+            tag: "kalagram-local-test",
+          });
+        } catch (_) {}
+      }
     } catch (err) {
       console.error(err);
-      toast(err.message || "Не удалось включить уведомления", 4000);
+      toast(err.message || "Не удалось включить уведомления", 4500);
       updatePushStatus();
+    }
+  }
+
+  async function testPushFromServer() {
+    try {
+      if (!state.token) {
+        toast("Сначала войдите");
+        return;
+      }
+      toast("Шлём тест с сервера…");
+      const r = await api("/api/push/test", { method: "POST" });
+      toast("Тест отправлен (устройств: " + (r.subscriptions || 0) + ")", 3000);
+    } catch (err) {
+      toast(err.message || "Тест не прошёл", 4000);
     }
   }
 
