@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.14";
+  const APP_VERSION = "1.15";
   const APP_UPDATE_NOTES =
-    "Обнова 1.14 готова ✓\n• Голосовые: фикс пустой записи + лёгкий webm/opus (на iPhone m4a)\n• 🎤 → говори → ✓";
+    "Обнова 1.15 готова ✓\n• Фикс кнопки микрофона на iPhone\n• 🎤 → говори → синяя ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -2047,12 +2047,35 @@
     throw lastErr || new Error("MediaRecorder unavailable");
   }
 
+  async function ensureMicStreamWithTimeout(ms = 12000) {
+    let timer;
+    try {
+      return await Promise.race([
+        ensureMicStream(),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Микрофон не отвечает. Разрешите доступ и нажмите ещё раз")),
+            ms
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function startRecording() {
     if (!state.peer || state.systemChat) {
       toast("Откройте обычный чат");
       return false;
     }
-    if (state.recordingActive || state.sendingVoice || micBusy) return false;
+    if (state.recordingActive || state.sendingVoice) {
+      return false;
+    }
+    if (micBusy) {
+      toast("Подождите, открываю микрофон…");
+      return false;
+    }
     const block = micBlockReason();
     if (block) {
       toast(block, 5000);
@@ -2060,18 +2083,19 @@
     }
 
     micBusy = true;
+    toast("Микрофон…", 1200);
     // unlock audio in the user gesture chain
     const ctx = unlockAudioContext();
 
     try {
-      const stream = await ensureMicStream();
+      const stream = await ensureMicStreamWithTimeout(12000);
       if (ctx && ctx.state === "suspended") {
         try {
           await ctx.resume();
         } catch {}
       }
       // let mic stabilize (iOS)
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 100));
 
       state.recordChunks = [];
       state.recordBlob = null;
@@ -2085,7 +2109,7 @@
       let mrOk = false;
       let pcmOk = false;
 
-      // 1) MediaRecorder (compressed: m4a on iOS, webm/opus on Android/PC)
+      // 1) MediaRecorder (m4a on iOS, webm/opus on Android/PC)
       if (typeof MediaRecorder !== "undefined") {
         try {
           const rec = makeRecorder(stream);
@@ -2112,9 +2136,14 @@
         }
       }
 
-      // 2) Always start PCM backup (fills when MR is empty on iPhone)
+      // 2) PCM backup (when MR empty on iPhone)
       if (ctx) {
-        pcmOk = startPcmBackup(stream, ctx);
+        try {
+          pcmOk = !!startPcmBackup(stream, ctx);
+        } catch (e) {
+          console.warn("PCM backup error", e);
+          pcmOk = false;
+        }
       }
 
       if (!mrOk && !pcmOk) {
@@ -2125,18 +2154,21 @@
 
       state.recordReady = true;
       showRecordUI();
+      toast("Запись… нажмите синюю ✓", 2500);
       return true;
     } catch (err) {
       console.error(err);
       state.recordingActive = false;
       state.mediaRecorder = null;
+      state.wavFallback = null;
+      hideRecordUI();
       const name = err && err.name;
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
         toast("Настройки → Калаграм → Микрофон → Вкл (один раз)", 6000);
       } else if (name === "NotFoundError") {
         toast("Микрофон не найден");
       } else {
-        toast("Микрофон: " + (err.message || name || "ошибка"), 4000);
+        toast(err.message || name || "Ошибка микрофона", 4500);
       }
       return false;
     } finally {
@@ -2356,49 +2388,70 @@
   }
 
   function bindMicHold() {
-    const btn = $("#btn-mic");
-    if (!btn || btn._micBound) return;
-    btn._micBound = true;
-    let lastTouchAt = 0;
+    // Simple, reliable: click only (+ ignore ghost double-fires)
+    // preventDefault on touchend was killing the mic button on iOS PWA.
+    if (bindMicHold._done) return;
+    bindMicHold._done = true;
+    let lock = false;
+    let lastAt = 0;
 
-    const onMicActivate = async () => {
-      if (!state.peer || state.systemChat) {
-        toast("Откройте чат с человеком");
-        return;
-      }
-      if (state.sendingVoice || micBusy) return;
-
-      if (state.recordingActive) {
-        await finishRecording(true);
-        return;
-      }
-
-      unlockAudioContext();
-      const ok = await startRecording();
-      if (ok) {
-        toast("Запись… нажмите синюю ✓", 2500);
+    const activateMic = async () => {
+      const now = Date.now();
+      if (now - lastAt < 450) return; // debounce double tap/click
+      lastAt = now;
+      if (lock) return;
+      lock = true;
+      try {
+        if (!state.peer || state.systemChat) {
+          toast("Откройте чат с человеком");
+          return;
+        }
+        if (state.sendingVoice) {
+          toast("Отправка…");
+          return;
+        }
+        if (state.recordingActive || state.mediaRecorder || state.wavFallback) {
+          await finishRecording(true);
+          return;
+        }
+        unlockAudioContext();
+        await startRecording();
+      } catch (err) {
+        console.error(err);
+        toast(err.message || "Ошибка записи");
+        micBusy = false;
+        state.recordingActive = false;
+      } finally {
+        lock = false;
       }
     };
 
-    btn.addEventListener(
-      "touchend",
-      (e) => {
-        lastTouchAt = Date.now();
-        if (e.cancelable) e.preventDefault();
-        onMicActivate();
-      },
-      { passive: false }
-    );
-
-    btn.addEventListener("click", (e) => {
-      if (Date.now() - lastTouchAt < 600) {
+    // Bind directly + delegation (belt and suspenders)
+    const wire = (el) => {
+      if (!el || el._micWired) return;
+      el._micWired = true;
+      el.addEventListener("click", (e) => {
         e.preventDefault();
-        return;
-      }
-      onMicActivate();
-    });
+        e.stopPropagation();
+        activateMic();
+      });
+    };
 
-    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+    wire($("#btn-mic"));
+    document.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target && e.target.closest && e.target.closest("#btn-mic");
+        if (!btn) return;
+        // if already wired on the element, its handler runs too — debounce handles it
+        if (!btn._micWired) {
+          e.preventDefault();
+          e.stopPropagation();
+          activateMic();
+        }
+      },
+      true
+    );
   }
 
   // ── Profile ──────────────────────────────

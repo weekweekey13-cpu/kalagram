@@ -944,13 +944,14 @@ img { display: block; max-width: 100%; }
 .mic-btn {
   background: var(--bg-hover);
   color: var(--accent-strong);
-  touch-action: none;
+  touch-action: manipulation;
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
   position: relative;
-  z-index: 20;
+  z-index: 30;
   cursor: pointer;
+  pointer-events: auto;
 }
 
 .mic-btn.recording {
