@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.20";
+  const APP_VERSION = "1.21";
   const APP_UPDATE_NOTES =
-    "Обнова 1.20 готова ✓\n• Голос: надёжный захват на iPhone\n• 🎤 → 2 сек → ✓";
+    "Обнова 1.21 готова ✓\n• Профиль → «Разрешить микрофон» (iPhone)\n• 🎤 → говори → ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -2516,6 +2516,75 @@
     $("#profile-nick").textContent = "@" + state.me.nick;
     $("#profile-name-input").value = state.me.display_name || "";
     if (typeof updatePushStatus === "function") updatePushStatus();
+    updateMicStatus();
+  }
+
+  function updateMicStatus() {
+    const el = $("#mic-status");
+    if (!el) return;
+    const live =
+      (typeof streamIsLive === "function" && streamIsLive(Voice && Voice.stream)) ||
+      (state.micStream &&
+        state.micStream.getAudioTracks &&
+        state.micStream.getAudioTracks().some((t) => t.readyState === "live"));
+    if (live) {
+      el.textContent = "Микрофон: доступ есть ✓";
+      return;
+    }
+    try {
+      if (localStorage.getItem(MIC_OK_KEY) === "1") {
+        el.textContent = "Микрофон: ранее разрешён (нажмите кнопку, если не пишет)";
+        return;
+      }
+    } catch {}
+    el.textContent = "Микрофон: ещё не запрашивали — нажмите кнопку выше";
+  }
+
+  async function requestMicPermission() {
+    const block = micBlockReason();
+    if (block) {
+      toast(block, 5000);
+      return false;
+    }
+    toast("Запрос микрофона…", 2000);
+    try {
+      // Must run from user tap — shows iOS Allow dialog
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Keep stream for later voice messages (no re-prompt)
+      if (typeof Voice !== "undefined") {
+        if (Voice.stream && Voice.stream !== stream) {
+          try {
+            Voice.stream.getTracks().forEach((t) => t.stop());
+          } catch {}
+        }
+        Voice.stream = stream;
+      }
+      state.micStream = stream;
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = true;
+      });
+      try {
+        localStorage.setItem(MIC_OK_KEY, "1");
+      } catch {}
+      toast("Микрофон разрешён ✓", 2500);
+      updateMicStatus();
+      return true;
+    } catch (err) {
+      console.error(err);
+      const name = err && err.name;
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        toast(
+          "Доступ запрещён. Настройки → Safari → Микрофон → Разрешить, или сбросьте для сайта",
+          6000
+        );
+      } else if (name === "NotFoundError") {
+        toast("Микрофон не найден");
+      } else {
+        toast((err && err.message) || "Не удалось открыть микрофон", 4000);
+      }
+      updateMicStatus();
+      return false;
+    }
   }
 
   // ── WebSocket ────────────────────────────
@@ -2856,6 +2925,13 @@
         toast(err.message);
       }
     });
+
+    const btnMicPerm = $("#btn-enable-mic");
+    if (btnMicPerm) {
+      btnMicPerm.addEventListener("click", () => {
+        requestMicPermission();
+      });
+    }
 
     $("#profile-avatar").addEventListener("click", (ev) => {
       ev.preventDefault();
