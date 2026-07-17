@@ -6,11 +6,18 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.12";
+  const APP_VERSION = "1.13";
   const APP_UPDATE_NOTES =
-    "Обнова 1.12 готова ✓\n• Голосовые: микрофон → говори → ✓\n• Можно писать";
+    "Обнова 1.13 готова ✓\n• Служебные SMS обновы — только вам (@JOPA)\n• Голосовые: микрофон → говори → ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
+  // Only this nick sees «SMS» from Калаграм about updates
+  const UPDATE_ADMIN_NICK = "JOPA";
+
+  function canSeeUpdateSms() {
+    const nick = (state.me && state.me.nick) || "";
+    return nick.toLowerCase() === UPDATE_ADMIN_NICK.toLowerCase();
+  }
 
   const TOKEN_KEY = "kalagram_token";
   const TOKEN_KEY_LEGACY = "msg_token";
@@ -600,8 +607,6 @@
     if (!state.token) state.token = readStoredToken();
     if (!state.token) {
       showView("auth");
-      // still check version so guest sees update after deploy
-      checkAppUpdate().catch(() => {});
       return;
     }
     try {
@@ -688,6 +693,14 @@
   }
 
   async function checkAppUpdate() {
+    // Service «SMS» about updates — only for @JOPA
+    if (!canSeeUpdateSms()) {
+      // hide any leftover banner for other accounts
+      const el = $("#update-banner");
+      if (el) el.classList.add("hidden");
+      return { version: APP_VERSION, isNew: false };
+    }
+
     let version = APP_VERSION;
     let notes = APP_UPDATE_NOTES;
     try {
@@ -710,7 +723,6 @@
       } catch {}
       toast(`Калаграм ${version} — обнова уже здесь ✓`, 5000);
       showUpdateBanner(version, notes);
-      // try SW update so next open gets fresh assets
       try {
         if (navigator.serviceWorker) {
           const reg = await navigator.serviceWorker.getRegistration();
@@ -718,12 +730,12 @@
         }
       } catch {}
     }
-    // refresh chat list to show Калаграм inbox row
     if (state.me) renderChats();
     return { version, isNew };
   }
 
   function openSystemUpdates() {
+    if (!canSeeUpdateSms()) return;
     stopRecording(true);
     exitSelectMode();
     const inbox = getUpdateInbox();
@@ -796,13 +808,14 @@
       });
     }
 
-    const updates = getUpdateInbox();
+    const updates = canSeeUpdateSms() ? getUpdateInbox() : [];
     const latestUp = updates[0];
     const showSys =
-      !q ||
-      "калаграм".includes(q) ||
-      "kalagram".includes(q) ||
-      (latestUp && (latestUp.text || "").toLowerCase().includes(q));
+      canSeeUpdateSms() &&
+      (!q ||
+        "калаграм".includes(q) ||
+        "kalagram".includes(q) ||
+        (latestUp && (latestUp.text || "").toLowerCase().includes(q)));
     const unreadSys = updates.filter((u) => !u.read).length;
 
     let sysHtml = "";

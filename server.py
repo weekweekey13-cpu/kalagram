@@ -717,11 +717,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 # Bump this on every user-facing release — client shows «SMS» from Калаграм
-APP_VERSION = "1.12"
+# (only for nick JOPA on the client)
+APP_VERSION = "1.13"
 APP_UPDATE_NOTES = (
-    "Обнова 1.12 готова ✓\n"
-    "• Голосовые: нажми микрофон → говори → синяя ✓\n"
-    "• Разрешение на микрофон — один раз\n"
+    "Обнова 1.13 готова ✓\n"
+    "• Служебные SMS обновы — только @JOPA\n"
+    "• Голосовые: микрофон → говори → ✓\n"
     "• Можно пользоваться и писать"
 )
 
