@@ -120,38 +120,92 @@
   function setAvatar(el, user, opts = {}) {
     if (!el) return;
     const isGroup = opts.isGroup || user?.is_group;
+    // clear previous online dot then rebuild
+    const wasOnline = !!user?.online;
+    el.querySelector(".dot")?.remove();
     if (isGroup) {
       el.classList.add("group-av", "has-img");
-      el.style.backgroundImage = "";
-      el.style.background = "";
+      el.style.backgroundImage = "none";
+      el.style.background = "linear-gradient(145deg, #5b7cfa, #a56cff)";
       el.textContent = "👥";
-      el.querySelector(".dot")?.remove();
+      el.style.color = "#fff";
       return;
     }
     el.classList.remove("group-av");
     const name = user?.display_name || user?.nick || "?";
-    el.textContent = initials(name);
-    el.classList.toggle("has-img", !!user?.avatar);
-    if (user?.avatar) {
-      el.style.backgroundImage = `url(${user.avatar})`;
-      el.style.background = "";
+    const hasAvatar = !!(user?.avatar);
+    el.classList.toggle("has-img", hasAvatar);
+    if (hasAvatar) {
+      // IMPORTANT: do not set style.background after backgroundImage —
+      // shorthand "background" wipes background-image.
+      const url = user.avatar + (user.avatar.includes("?") ? "&" : "?") + "v=" + encodeURIComponent(user.avatar);
+      el.textContent = "";
+      el.style.color = "transparent";
+      el.style.backgroundImage = `url("${url}")`;
+      el.style.backgroundSize = "cover";
+      el.style.backgroundPosition = "center";
+      el.style.backgroundRepeat = "no-repeat";
+      el.style.backgroundColor = "#2a3145";
     } else {
-      el.style.backgroundImage = "";
+      el.textContent = initials(name);
+      el.style.backgroundImage = "none";
       let h = 0;
       for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
       el.style.background = `linear-gradient(145deg, hsl(${h},45%,38%), hsl(${(h + 40) % 360},50%,28%))`;
       el.style.color = "#e8ecf4";
     }
-    let dot = el.querySelector(".dot");
-    if (user?.online) {
-      if (!dot) {
-        dot = document.createElement("span");
-        dot.className = "dot";
-        el.appendChild(dot);
-      }
-    } else if (dot) {
-      dot.remove();
+    if (wasOnline) {
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      el.appendChild(dot);
     }
+  }
+
+  /** Convert any image (incl. iPhone HEIC when browser supports) to JPEG blob for upload */
+  function fileToJpegBlob(file, maxSide = 512, quality = 0.88) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          let w = img.naturalWidth || img.width;
+          let h = img.naturalHeight || img.height;
+          if (!w || !h) {
+            URL.revokeObjectURL(url);
+            resolve(file);
+            return;
+          }
+          const scale = Math.min(1, maxSide / Math.max(w, h));
+          w = Math.round(w * scale);
+          h = Math.round(h * scale);
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#1a1f2b";
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          canvas.toBlob(
+            (blob) => {
+              URL.revokeObjectURL(url);
+              if (blob) resolve(blob);
+              else reject(new Error("Не удалось обработать фото"));
+            },
+            "image/jpeg",
+            quality
+          );
+        } catch (e) {
+          URL.revokeObjectURL(url);
+          reject(e);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        // fallback: upload original
+        resolve(file);
+      };
+      img.src = url;
+    });
   }
 
   function formatTime(ts) {
@@ -1332,22 +1386,37 @@
     $("#avatar-input").addEventListener("change", async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      const fd = new FormData();
-      fd.append("file", file);
+      toast("Загрузка фото…", 1500);
       try {
+        // resize + JPEG so iPhone photos upload reliably
+        const blob = await fileToJpegBlob(file);
+        const fd = new FormData();
+        fd.append("file", blob, "avatar.jpg");
         const res = await fetch("/api/me/avatar", {
           method: "POST",
           headers: { Authorization: `Bearer ${state.token}` },
+          credentials: "include",
           body: fd,
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Ошибка загрузки");
+        let data = null;
+        try {
+          data = await res.json();
+        } catch {
+          throw new Error("Сервер не ответил");
+        }
+        if (!res.ok) {
+          const d = data?.detail;
+          throw new Error(typeof d === "string" ? d : "Ошибка загрузки");
+        }
         state.me = data;
+        // force-refresh avatars in UI
         setAvatar($("#me-avatar-btn"), state.me);
+        setAvatar($("#profile-avatar"), state.me);
         renderProfile();
         toast("Аватар обновлён");
       } catch (err) {
-        toast(err.message);
+        console.error(err);
+        toast(err.message || "Не удалось сменить аватар");
       }
       e.target.value = "";
     });
