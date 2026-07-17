@@ -20,7 +20,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png" />
   <title>Калаграм</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=3" />
+  <link rel="stylesheet" href="/static/css/style.css?v=4" />
 </head>
 <body>
   <div id="app">
@@ -225,14 +225,20 @@
             <input type="text" id="profile-name-input" maxlength="48" placeholder="Как вас видеть" />
           </label>
           <button type="button" class="btn btn-primary btn-block" id="btn-save-profile">Сохранить</button>
+          <button type="button" class="btn btn-primary btn-block" id="btn-enable-push">🔔 Включить уведомления</button>
+          <p class="profile-hint" id="push-status" style="margin-top:8px;text-align:center"></p>
           <button type="button" class="btn btn-ghost btn-block danger" id="btn-logout">Выйти</button>
           <div class="install-card" id="install-card">
-            <h3>На главный экран iPhone</h3>
+            <h3>Уведомления на iPhone</h3>
             <ol>
-              <li>Нажмите <strong>Поделиться</strong> <span class="ios-share">⎙</span> в Safari</li>
-              <li>Выберите <strong>«На экран „Домой“»</strong></li>
-              <li>Нажмите <strong>Добавить</strong></li>
+              <li>Откройте сайт в <strong>Safari</strong></li>
+              <li><strong>Поделиться</strong> → <strong>На экран «Домой»</strong></li>
+              <li>Откройте <strong>Калаграм с домашнего экрана</strong> (не из Safari)</li>
+              <li>Профиль → <strong>Включить уведомления</strong> → Разрешить</li>
             </ol>
+            <p style="margin-top:10px;font-size:.85rem;color:var(--text-muted)">
+              На iPhone push работает только из приложения с «Домой» (iOS 16.4+).
+            </p>
           </div>
         </div>
       </div>
@@ -240,6 +246,6 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status"></div>
-  <script src="/static/js/app.js?v=3"></script>
+  <script src="/static/js/app.js?v=4"></script>
 </body>
 </html>

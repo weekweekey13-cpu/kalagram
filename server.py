@@ -28,6 +28,12 @@ from db import (
     load_media,
     save_media,
 )
+from push_service import (
+    ensure_vapid_keys,
+    ensure_vapid_keys_db,
+    public_key as vapid_public_key,
+    send_web_push,
+)
 from fastapi import (
     Cookie,
     Depends,
@@ -444,15 +450,77 @@ async def broadcast_message(msg: dict[str, Any], sender: dict[str, Any]) -> None
             "avatar": sender["avatar"],
         },
     }
+    notify_ids: list[int] = []
     if msg.get("group_id"):
         members = await get_group_member_ids(msg["group_id"])
         for mid in members:
             await manager.send_to(mid, event)
+            if mid != sender["id"]:
+                notify_ids.append(mid)
     else:
         rid = msg.get("receiver_id")
         if rid:
             await manager.send_to(rid, event)
+            if rid != sender["id"]:
+                notify_ids.append(int(rid))
         await manager.send_to(sender["id"], event)
+
+    # iPhone/Android home-screen push (also when app is closed)
+    if notify_ids:
+        preview = msg.get("text") or ""
+        if msg.get("msg_type") == "voice":
+            preview = "🎤 Голосовое"
+        elif msg.get("msg_type") == "system":
+            return
+        if len(preview) > 120:
+            preview = preview[:117] + "…"
+        title = sender.get("display_name") or sender.get("nick") or "Калаграм"
+        data = {
+            "peer_id": msg.get("group_id") or msg.get("sender_id"),
+            "group_id": msg.get("group_id"),
+            "is_group": bool(msg.get("group_id")),
+        }
+        await push_notify_users(notify_ids, title, preview, data)
+
+
+async def push_notify_users(
+    user_ids: list[int],
+    title: str,
+    body: str,
+    data: dict[str, Any] | None = None,
+) -> None:
+    if not user_ids:
+        return
+    try:
+        ensure_vapid_keys()
+    except Exception as e:
+        print("VAPID error", e)
+        return
+    async with connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # fetch all subscriptions for recipients
+        placeholders = ",".join("?" * len(user_ids))
+        cur = await db.execute(
+            f"SELECT endpoint, p256dh, auth, user_id FROM push_subscriptions WHERE user_id IN ({placeholders})",
+            tuple(user_ids),
+        )
+        rows = await cur.fetchall()
+    gone: list[str] = []
+    for r in rows:
+        sub = {
+            "endpoint": r["endpoint"],
+            "keys": {"p256dh": r["p256dh"], "auth": r["auth"]},
+        }
+        result = await send_web_push(sub, title, body, data)
+        if result == "gone":
+            gone.append(r["endpoint"])
+    if gone:
+        async with connect(DB_PATH) as db:
+            for ep in gone:
+                await db.execute(
+                    "DELETE FROM push_subscriptions WHERE endpoint = ?", (ep,)
+                )
+            await db.commit()
 
 
 # ── websocket hub ───────────────────────────────────────────────
@@ -537,6 +605,15 @@ manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    try:
+        await ensure_vapid_keys_db(connect, DB_PATH)
+        print("  Push: VAPID keys ready")
+    except Exception as e:
+        try:
+            ensure_vapid_keys()
+            print("  Push: VAPID keys ready (file)")
+        except Exception as e2:
+            print("  Push: VAPID init failed", e, e2)
     yield
     await close_pool()
 
@@ -552,12 +629,74 @@ async def health():
         "app": "Калаграм",
         "database": "postgres" if USE_PG else "sqlite",
         "persistent": bool(USE_PG),
+        "push": True,
         "hint": (
             "Данные на Neon — переживают перезапуск"
             if USE_PG
             else "SQLite на временном диске Render — после сна/деплоя данные могут пропасть. Добавьте DATABASE_URL (Neon)."
         ),
     }
+
+
+class PushSubIn(BaseModel):
+    endpoint: str
+    keys: dict[str, str]
+
+
+@app.get("/api/push/vapid-public-key")
+async def push_vapid_key():
+    try:
+        return {"publicKey": vapid_public_key()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Push keys: {e}")
+
+
+@app.post("/api/push/subscribe")
+async def push_subscribe(body: PushSubIn, user: dict = Depends(get_current_user)):
+    p256dh = (body.keys or {}).get("p256dh") or ""
+    auth = (body.keys or {}).get("auth") or ""
+    if not body.endpoint or not p256dh or not auth:
+        raise HTTPException(status_code=400, detail="Некорректная подписка")
+    now = time.time()
+    async with connect(DB_PATH) as db:
+        # upsert
+        if USE_PG:
+            await db.execute(
+                """
+                INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (endpoint) DO UPDATE SET
+                  user_id = EXCLUDED.user_id,
+                  p256dh = EXCLUDED.p256dh,
+                  auth = EXCLUDED.auth,
+                  created_at = EXCLUDED.created_at
+                """,
+                (body.endpoint, user["id"], p256dh, auth, now),
+            )
+        else:
+            await db.execute(
+                "DELETE FROM push_subscriptions WHERE endpoint = ?", (body.endpoint,)
+            )
+            await db.execute(
+                """
+                INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (body.endpoint, user["id"], p256dh, auth, now),
+            )
+            await db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/push/subscribe")
+async def push_unsubscribe(body: PushSubIn, user: dict = Depends(get_current_user)):
+    async with connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?",
+            (body.endpoint, user["id"]),
+        )
+        await db.commit()
+    return {"ok": True}
 
 
 # ── auth routes ─────────────────────────────────────────────────

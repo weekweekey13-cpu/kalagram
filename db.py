@@ -238,6 +238,18 @@ CREATE TABLE IF NOT EXISTS media_files (
     content_type TEXT NOT NULL,
     data BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(sender_id, receiver_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_msg_receiver ON messages(receiver_id, read_at);
 CREATE INDEX IF NOT EXISTS idx_msg_group ON messages(group_id, created_at);
@@ -295,6 +307,18 @@ CREATE TABLE IF NOT EXISTS media_files (
     content_type TEXT NOT NULL,
     data BYTEA NOT NULL
 );
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(sender_id, receiver_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_msg_receiver ON messages(receiver_id, read_at);
 CREATE INDEX IF NOT EXISTS idx_msg_group ON messages(group_id, created_at);
@@ -326,6 +350,28 @@ async def init_schema(db_path: Path | None = None) -> None:
                     data BLOB NOT NULL
                 )
                 """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS push_subscriptions (
+                    endpoint TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    p256dh TEXT NOT NULL,
+                    auth TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id)"
             )
             await db.commit()
 

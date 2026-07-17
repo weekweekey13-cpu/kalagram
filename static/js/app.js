@@ -1165,6 +1165,7 @@
     $("#profile-display").textContent = state.me.display_name;
     $("#profile-nick").textContent = "@" + state.me.nick;
     $("#profile-name-input").value = state.me.display_name || "";
+    if (typeof updatePushStatus === "function") updatePushStatus();
   }
 
   // ── WebSocket ────────────────────────────
@@ -1334,6 +1335,7 @@
         setAvatar($("#me-avatar-btn"), data.user);
         await Promise.all([loadChats(), loadContacts()]);
         connectWs();
+        afterLoginPush();
       } catch (ex) {
         err.textContent = ex.message;
         err.hidden = false;
@@ -1356,6 +1358,7 @@
         setAvatar($("#me-avatar-btn"), data.user);
         await Promise.all([loadChats(), loadContacts()]);
         connectWs();
+        afterLoginPush();
         toast("Аккаунт создан");
       } catch (ex) {
         err.textContent = ex.message;
@@ -1509,11 +1512,136 @@
       showView("auth");
     });
 
+    const pushBtn = $("#btn-enable-push");
+    if (pushBtn) {
+      pushBtn.addEventListener("click", () => enablePushNotifications(true));
+    }
+
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
+      navigator.serviceWorker
+        .register("/sw.js?v=4")
+        .then(() => {
+          // after login bootstrap may not have finished; try soft setup
+        })
+        .catch(() => {});
+      navigator.serviceWorker.addEventListener("message", (ev) => {
+        const d = ev.data || {};
+        if (d.type === "open-chat") {
+          if (d.is_group && d.group_id) openGroupChat(+d.group_id);
+          else if (d.peer_id) openChat(+d.peer_id);
+        }
+      });
     }
   }
 
+  function isStandalonePwa() {
+    return (
+      window.matchMedia("(display-mode: standalone)").matches ||
+      window.navigator.standalone === true
+    );
+  }
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(base64);
+    const arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr;
+  }
+
+  async function updatePushStatus() {
+    const el = $("#push-status");
+    const btn = $("#btn-enable-push");
+    if (!el || !btn) return;
+    if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+      el.textContent = "Браузер не поддерживает push";
+      btn.disabled = true;
+      return;
+    }
+    const perm = Notification.permission;
+    if (perm === "granted") {
+      el.textContent = isStandalonePwa()
+        ? "Уведомления включены ✓"
+        : "Разрешены, но на iPhone откройте Калаграм с «Домой»";
+      btn.textContent = "🔔 Уведомления включены";
+    } else if (perm === "denied") {
+      el.textContent = "Запрещены в настройках iPhone → Калаграм";
+      btn.textContent = "🔔 Уведомления выключены";
+    } else {
+      el.textContent = isStandalonePwa()
+        ? "Нажмите кнопку и разрешите уведомления"
+        : "Сначала добавьте на «Домой» и откройте оттуда";
+      btn.textContent = "🔔 Включить уведомления";
+    }
+  }
+
+  async function enablePushNotifications(fromButton) {
+    try {
+      if (!state.token) {
+        toast("Сначала войдите");
+        return;
+      }
+      if (!("Notification" in window) || !("PushManager" in window)) {
+        toast("Push не поддерживается");
+        return;
+      }
+      if (!isStandalonePwa() && /iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+        toast("На iPhone: откройте Калаграм с домашнего экрана", 4000);
+        updatePushStatus();
+        if (!fromButton) return;
+        // still try — some versions allow
+      }
+      const reg = await navigator.serviceWorker.ready;
+      let perm = Notification.permission;
+      if (perm !== "granted") {
+        perm = await Notification.requestPermission();
+      }
+      if (perm !== "granted") {
+        toast("Нужно разрешить уведомления");
+        updatePushStatus();
+        return;
+      }
+      const { publicKey } = await api("/api/push/vapid-public-key");
+      if (!publicKey) throw new Error("Нет ключа push");
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+      }
+      const json = sub.toJSON();
+      await api("/api/push/subscribe", {
+        method: "POST",
+        json: {
+          endpoint: json.endpoint,
+          keys: {
+            p256dh: json.keys.p256dh,
+            auth: json.keys.auth,
+          },
+        },
+      });
+      toast("Уведомления включены");
+      updatePushStatus();
+    } catch (err) {
+      console.error(err);
+      toast(err.message || "Не удалось включить уведомления", 4000);
+      updatePushStatus();
+    }
+  }
+
+  async function afterLoginPush() {
+    try {
+      updatePushStatus();
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        await enablePushNotifications(false);
+      }
+    } catch (_) {}
+  }
+
   bind();
-  bootstrap();
+  bootstrap().then(() => {
+    if (state.token) afterLoginPush();
+  });
 })();
