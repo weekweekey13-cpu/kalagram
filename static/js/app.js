@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.21";
+  const APP_VERSION = "1.22";
   const APP_UPDATE_NOTES =
-    "Обнова 1.21 готова ✓\n• Профиль → «Разрешить микрофон» (iPhone)\n• 🎤 → говори → ✓";
+    "Обнова 1.22 готова ✓\n• Фикс «микрофон не активен»\n• 🎤 → говори → ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -1844,11 +1844,22 @@
   }
 
   function streamIsLive(stream) {
-    return !!(
-      stream &&
-      stream.getAudioTracks &&
-      stream.getAudioTracks().some((t) => t.readyState === "live")
-    );
+    if (!stream || !stream.getAudioTracks) return false;
+    return stream.getAudioTracks().some((t) => {
+      // iOS: muted can be true briefly even when live — don't treat as dead
+      return t && t.readyState === "live";
+    });
+  }
+
+  function discardMicStream() {
+    const s = Voice.stream || state.micStream;
+    if (s) {
+      try {
+        s.getTracks().forEach((t) => t.stop());
+      } catch {}
+    }
+    Voice.stream = null;
+    state.micStream = null;
   }
 
   function voiceUnlockCtx() {
@@ -1873,29 +1884,41 @@
     return Voice.audioCtx;
   }
 
-  async function voiceGetStream() {
-    if (streamIsLive(Voice.stream)) {
+  async function voiceGetStream(forceNew) {
+    if (!forceNew && streamIsLive(Voice.stream)) {
       Voice.stream.getAudioTracks().forEach((t) => {
-        t.enabled = true;
+        try {
+          t.enabled = true;
+        } catch {}
       });
       state.micStream = Voice.stream;
       return Voice.stream;
     }
-    if (Voice.stream) {
-      try {
-        Voice.stream.getTracks().forEach((t) => t.stop());
-      } catch {}
-      Voice.stream = null;
-    }
+    // Old/dead stream (common after backgrounding iPhone PWA)
+    discardMicStream();
+
     // Simplest constraints — most reliable on iOS PWA
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e1) {
+      // retry with explicit constraints
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+    }
     Voice.stream = stream;
     state.micStream = stream;
     try {
       localStorage.setItem(MIC_OK_KEY, "1");
     } catch {}
     stream.getAudioTracks().forEach((t) => {
-      t.enabled = true;
+      try {
+        t.enabled = true;
+      } catch {}
       t.onended = () => {
         if (Voice.stream === stream) Voice.stream = null;
         if (state.micStream === stream) state.micStream = null;
@@ -2114,13 +2137,7 @@
 
   function releaseMicStream() {
     voiceHardReset();
-    if (Voice.stream) {
-      try {
-        Voice.stream.getTracks().forEach((t) => t.stop());
-      } catch {}
-      Voice.stream = null;
-    }
-    state.micStream = null;
+    discardMicStream();
     if (Voice.audioCtx && Voice.audioCtx.state !== "closed") {
       try {
         Voice.audioCtx.close();
@@ -2166,21 +2183,31 @@
     const ctx = voiceUnlockCtx();
 
     try {
-      const stream = await withTimeout(
-        voiceGetStream(),
+      let stream = await withTimeout(
+        voiceGetStream(false),
         10000,
-        "Нет ответа микрофона. Настройки → Калаграм → Микрофон → Вкл"
+        "Нет ответа микрофона. Профиль → «Разрешить микрофон»"
       );
       if (myGen !== Voice.gen) return false;
 
-      const track = stream.getAudioTracks()[0];
-      if (track) {
-        track.enabled = true;
-        // live check
-        if (track.readyState !== "live") {
-          throw new Error("Микрофон не активен");
-        }
+      let track = stream.getAudioTracks && stream.getAudioTracks()[0];
+      // Dead/ended track after app background — force new getUserMedia
+      if (!track || track.readyState !== "live") {
+        stream = await withTimeout(
+          voiceGetStream(true),
+          10000,
+          "Нет ответа микрофона. Профиль → «Разрешить микрофон»"
+        );
+        if (myGen !== Voice.gen) return false;
+        track = stream.getAudioTracks && stream.getAudioTracks()[0];
       }
+      if (track) {
+        try {
+          track.enabled = true;
+        } catch {}
+      }
+      // Do NOT throw on muted/readyState quirks — iOS lies sometimes.
+      // MediaRecorder/PCM will fail loudly if stream is truly dead.
 
       // Resume AFTER mic granted — required for PCM callbacks
       if (ctx) {
