@@ -111,11 +111,10 @@ async def ensure_vapid_keys_db(connect_fn, db_path) -> tuple[str, str]:
 
         priv = meta.get("vapid_private") or ""
         pub = meta.get("vapid_public") or ""
-        # reject old PEM format stored earlier — regenerate
-        if priv.startswith("-----BEGIN") or (priv and pub and len(pub) >= 80):
-            if not priv.startswith("-----BEGIN"):
-                set_vapid_keys(priv, pub)
-                return _private_b64, _public_b64
+        # Use stored raw keys; reject old PEM format
+        if priv and pub and not priv.startswith("-----BEGIN") and len(pub) >= 80:
+            set_vapid_keys(priv, pub)
+            return _private_b64, _public_b64
 
         priv_b64, pub_b64 = _generate_pair()
         try:
