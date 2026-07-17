@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.18";
+  const APP_VERSION = "1.19";
   const APP_UPDATE_NOTES =
-    "Обнова 1.18 готова ✓\n• Убран «Сброс… жмите ещё раз»\n• 🎤 → говори → ✓";
+    "Обнова 1.19 готова ✓\n• Фикс «нет звука» при записи\n• 🎤 → говори → ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -1953,7 +1953,16 @@
   }
 
   function startPcm(stream, ctx) {
-    const source = ctx.createMediaStreamSource(stream);
+    // Use a CLONE of the track so MediaRecorder and WebAudio don't fight on iOS
+    let pcmStream = stream;
+    try {
+      const t = stream.getAudioTracks()[0];
+      if (t) pcmStream = new MediaStream([t.clone ? t.clone() : t]);
+    } catch {
+      pcmStream = stream;
+    }
+
+    const source = ctx.createMediaStreamSource(pcmStream);
     // Keep graph alive on iOS (fully silent graphs may be skipped)
     const osc = ctx.createOscillator();
     const oscG = ctx.createGain();
@@ -1965,31 +1974,38 @@
       osc.start();
     } catch {}
 
-    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const bufferSize = 2048;
+    const proc = ctx.createScriptProcessor(bufferSize, 1, 1);
     const g = ctx.createGain();
     g.gain.value = 0.00001;
     const chunks = [];
     let capturing = true;
+    let frames = 0;
     proc.onaudioprocess = (e) => {
       if (!capturing) return;
       const input = e.inputBuffer.getChannelData(0);
-      chunks.push(new Float32Array(input));
+      // always copy — buffer is reused by the browser
+      const copy = new Float32Array(input.length);
+      copy.set(input);
+      chunks.push(copy);
+      frames += input.length;
     };
     source.connect(proc);
     proc.connect(g);
     g.connect(ctx.destination);
 
     Voice.pcm = {
-      capturing: () => capturing,
       stopCapture: () => {
         capturing = false;
       },
+      getFrames: () => frames,
       chunks,
       source,
       proc,
       g,
       osc,
       oscG,
+      pcmStream,
       sampleRate: ctx.sampleRate || 44100,
     };
   }
@@ -2004,12 +2020,23 @@
       p.source.disconnect();
       p.g.disconnect();
       p.oscG.disconnect();
-      p.osc.stop();
+      try {
+        p.osc.stop();
+      } catch {}
+      // stop cloned tracks only
+      if (p.pcmStream && p.pcmStream !== Voice.stream) {
+        p.pcmStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {}
+        });
+      }
     } catch {}
     const chunks = p.chunks;
     if (!chunks.length) return null;
     const total = chunks.reduce((n, c) => n + c.length, 0);
-    if (total < 800) return null;
+    // ~0.03s at 16k — very permissive, real empty is 0 frames
+    if (total < 200) return null;
     const samples = new Float32Array(total);
     let off = 0;
     for (const c of chunks) {
@@ -2119,8 +2146,8 @@
 
     const myGen = ++Voice.gen;
     Voice.phase = "starting";
-    toast("Микрофон…", 2000);
 
+    // Unlock audio context in the same user gesture (sync)
     const ctx = voiceUnlockCtx();
 
     try {
@@ -2131,16 +2158,19 @@
       );
       if (myGen !== Voice.gen) return false;
 
-      if (ctx && ctx.state === "suspended") {
+      // Resume context AFTER mic is open — critical for PCM on iOS
+      if (ctx) {
         try {
-          await withTimeout(
-            Promise.resolve(ctx.resume()).catch(() => {}),
-            300,
-            "resume"
-          );
+          if (ctx.state === "suspended") {
+            await withTimeout(
+              Promise.resolve(ctx.resume()).catch(() => {}),
+              800,
+              "resume"
+            );
+          }
         } catch {}
       }
-      await voiceSleep(40);
+      await voiceSleep(80);
       if (myGen !== Voice.gen) return false;
 
       Voice.chunks = [];
@@ -2149,7 +2179,28 @@
       Voice.startedAt = Date.now();
 
       let ok = false;
+      const ios = isIOSDevice();
 
+      // 1) PCM first on iOS (MediaRecorder alone often yields empty m4a)
+      //    On desktop, start both.
+      if (ctx && ctx.state === "running") {
+        try {
+          startPcm(stream, ctx);
+          ok = true;
+        } catch (e) {
+          console.warn("PCM fail", e);
+        }
+      } else if (ctx) {
+        // try PCM even if not "running" — some WebKits still fire callbacks
+        try {
+          startPcm(stream, ctx);
+          ok = true;
+        } catch (e) {
+          console.warn("PCM fail2", e);
+        }
+      }
+
+      // 2) MediaRecorder (compressed). Own handler stores into Voice.chunks.
       if (typeof MediaRecorder !== "undefined") {
         try {
           const mime = pickRecorderMime();
@@ -2161,28 +2212,17 @@
           rec.ondataavailable = (e) => {
             if (e.data && e.data.size > 0) Voice.chunks.push(e.data);
           };
-          if (isIOSDevice()) rec.start();
-          else {
-            try {
-              rec.start(250);
-            } catch {
-              rec.start();
-            }
+          // Small timeslice so we get data even if stop is flaky
+          try {
+            rec.start(ios ? 1000 : 250);
+          } catch {
+            rec.start();
           }
           ok = true;
         } catch (e) {
           console.warn("MR fail", e);
           Voice.rec = null;
           state.mediaRecorder = null;
-        }
-      }
-
-      if (ctx) {
-        try {
-          startPcm(stream, ctx);
-          ok = true;
-        } catch (e) {
-          console.warn("PCM fail", e);
         }
       }
 
@@ -2214,7 +2254,6 @@
       }
       return false;
     } finally {
-      // Never stay stuck in "starting"
       if (myGen === Voice.gen && Voice.phase === "starting") {
         Voice.phase = "idle";
         hideRecordUI();
@@ -2225,7 +2264,7 @@
   async function voiceCollectBlob() {
     const duration = Math.max(0, (Date.now() - Voice.startedAt) / 1000);
     const rec = Voice.rec;
-    const chunks = Voice.chunks;
+    const chunks = Voice.chunks.slice();
 
     if (rec && rec.state !== "inactive") {
       await new Promise((resolve) => {
@@ -2235,49 +2274,80 @@
           done = true;
           resolve();
         };
-        rec.addEventListener("dataavailable", (e) => {
+        const onData = (e) => {
           if (e.data && e.data.size > 0) chunks.push(e.data);
-        });
-        rec.addEventListener("stop", () => setTimeout(finish, 100), {
-          once: true,
-        });
+        };
+        rec.addEventListener("dataavailable", onData);
+        rec.addEventListener(
+          "stop",
+          () => {
+            rec.removeEventListener("dataavailable", onData);
+            setTimeout(finish, 150);
+          },
+          { once: true }
+        );
         try {
           try {
-            rec.requestData && rec.requestData();
+            if (typeof rec.requestData === "function") rec.requestData();
           } catch {}
           rec.stop();
         } catch {
           finish();
         }
-        setTimeout(finish, 2500);
+        setTimeout(finish, 3000);
       });
     }
 
-    await voiceSleep(50);
+    // Let last PCM buffers land
+    await voiceSleep(120);
     if (Voice.pcm) Voice.pcm.stopCapture();
+    await voiceSleep(40);
 
     const mrType = (rec && rec.mimeType) || pickRecorderMime() || "audio/mp4";
-    let mrBlob =
-      chunks.length > 0 ? new Blob(chunks, { type: mrType }) : null;
+    let mrBlob = null;
+    if (chunks.length) {
+      mrBlob = new Blob(chunks, { type: mrType || "audio/mp4" });
+    }
+
     let pcmBlob = null;
     try {
       pcmBlob = finishPcm();
-    } catch {
+    } catch (e) {
+      console.warn("finishPcm", e);
       Voice.pcm = null;
     }
 
+    // Prefer whatever has real payload
     let blob = null;
     let mime = "audio/wav";
-    if (mrBlob && mrBlob.size >= 200) {
+    const mrOk = mrBlob && mrBlob.size >= 100;
+    const pcmOk = pcmBlob && pcmBlob.size >= 100;
+    if (mrOk && pcmOk) {
+      // Prefer compressed if it's substantially larger than empty header
+      if (mrBlob.size >= 500) {
+        blob = mrBlob;
+        mime = mrType;
+      } else {
+        blob = pcmBlob;
+        mime = "audio/wav";
+      }
+    } else if (mrOk) {
       blob = mrBlob;
       mime = mrType;
-    } else if (pcmBlob && pcmBlob.size >= 200) {
+    } else if (pcmOk) {
       blob = pcmBlob;
       mime = "audio/wav";
     } else {
       blob = mrBlob || pcmBlob;
       mime = (blob && blob.type) || mime;
     }
+
+    console.log("voice collect", {
+      duration,
+      mrSize: mrBlob && mrBlob.size,
+      pcmSize: pcmBlob && pcmBlob.size,
+      chunks: chunks.length,
+    });
 
     Voice.rec = null;
     Voice.chunks = [];
@@ -2359,8 +2429,11 @@
         Voice.phase = "idle";
         return;
       }
-      if (!blob || blob.size < 80) {
-        toast("Нет звука. Проверьте: Настройки → Калаграм → Микрофон", 5000);
+      if (!blob || blob.size < 44) {
+        toast(
+          "Не записалось. Подержите 1–2 сек и снова ✓. Микрофон: Настройки → Калаграм",
+          5000
+        );
         Voice.phase = "idle";
         return;
       }
