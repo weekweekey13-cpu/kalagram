@@ -334,33 +334,56 @@
     $("#view-main").classList.toggle("hidden", name !== "main");
   }
 
+  function isDesktopLayout() {
+    return window.matchMedia("(min-width: 1024px)").matches;
+  }
+
   function showPanel(name) {
     state.activePanel = name;
     if (name === "chats" || name === "contacts") state.listPanel = name;
 
-    const hideAll = () => {
-      [
-        "#panel-chats",
-        "#panel-contacts",
-        "#panel-chat",
-        "#panel-search",
-        "#panel-profile",
-        "#panel-group",
-      ].forEach((s) => $(s).classList.add("hidden"));
+    const overlays = ["#panel-search", "#panel-profile", "#panel-group"];
+    const hideOverlays = () => overlays.forEach((s) => $(s).classList.add("hidden"));
+
+    const showList = (which) => {
+      $("#panel-chats").classList.toggle("hidden", which !== "chats");
+      $("#panel-contacts").classList.toggle("hidden", which !== "contacts");
+      $$(".tabbar .tab").forEach((t) => {
+        t.classList.toggle("active", t.dataset.panel === which);
+      });
     };
 
     if (name === "chat") {
-      hideAll();
-      $("#panel-chat").classList.remove("hidden");
+      hideOverlays();
+      if (isDesktopLayout()) {
+        // Desktop: keep chat list on the left, conversation on the right
+        showList(state.listPanel || "chats");
+        $("#panel-chat").classList.remove("hidden");
+        $("#panel-chat").classList.remove("desktop-empty");
+      } else {
+        // Mobile: full-screen conversation
+        $("#panel-chats").classList.add("hidden");
+        $("#panel-contacts").classList.add("hidden");
+        $("#panel-chat").classList.remove("hidden");
+      }
+      // focus composer so typing works immediately
+      setTimeout(() => {
+        const ta = $("#msg-input");
+        if (ta && isDesktopLayout()) ta.focus();
+      }, 50);
     } else if (name === "chats" || name === "contacts") {
-      hideAll();
-      $(name === "chats" ? "#panel-chats" : "#panel-contacts").classList.remove("hidden");
-      $$(".tabbar .tab").forEach((t) => {
-        t.classList.toggle("active", t.dataset.panel === name);
-      });
+      hideOverlays();
+      showList(name);
+      if (isDesktopLayout()) {
+        // Keep right pane visible (empty or last chat)
+        $("#panel-chat").classList.remove("hidden");
+        if (!state.peer) $("#panel-chat").classList.add("desktop-empty");
+      } else {
+        $("#panel-chat").classList.add("hidden");
+      }
     } else if (name === "search") {
       $("#panel-search").classList.remove("hidden");
-      setTimeout(() => $("#people-search").focus(), 50);
+      setTimeout(() => $("#people-search")?.focus(), 50);
     } else if (name === "profile") {
       $("#panel-profile").classList.remove("hidden");
       renderProfile();
@@ -471,9 +494,21 @@
     });
     list.querySelectorAll(".row").forEach((row) => {
       row.addEventListener("click", () => {
+        list.querySelectorAll(".row").forEach((r) => r.classList.remove("active-chat"));
+        row.classList.add("active-chat");
         if (+row.dataset.group) openGroupChat(+row.dataset.id);
         else openChat(+row.dataset.id);
       });
+      // mark active
+      if (state.peer) {
+        const isG = state.isGroup || state.peer.is_group;
+        if (isG && +row.dataset.group && +row.dataset.id === state.peer.id) {
+          row.classList.add("active-chat");
+        }
+        if (!isG && !+row.dataset.group && +row.dataset.id === state.peer.id) {
+          row.classList.add("active-chat");
+        }
+      }
     });
   }
 
@@ -659,37 +694,48 @@
   // ── Chat ─────────────────────────────────
   async function openChat(peerId) {
     stopRecording(true);
-    showPanel("chat");
-    $("#messages").innerHTML = "";
     state.isGroup = false;
+    showPanel("chat");
+    const box = $("#messages");
+    if (box) box.innerHTML = "";
     try {
       const data = await api(`/api/messages/${peerId}`);
       state.peer = data.peer;
-      state.messages = data.messages;
+      state.messages = data.messages || [];
+      $("#panel-chat")?.classList.remove("desktop-empty");
       renderPeerHeader();
       renderMessages(true);
-      loadChats();
+      // refresh list in background without closing chat on desktop
+      loadChats().catch(() => {});
+      if (isDesktopLayout()) {
+        setTimeout(() => $("#msg-input")?.focus(), 30);
+      }
     } catch (err) {
       toast(err.message);
-      showPanel("chats");
+      showPanel(state.listPanel || "chats");
     }
   }
 
   async function openGroupChat(groupId) {
     stopRecording(true);
-    showPanel("chat");
-    $("#messages").innerHTML = "";
     state.isGroup = true;
+    showPanel("chat");
+    const box = $("#messages");
+    if (box) box.innerHTML = "";
     try {
       const data = await api(`/api/groups/${groupId}/messages`);
       state.peer = { ...data.group, is_group: true, display_name: data.group.name };
-      state.messages = data.messages;
+      state.messages = data.messages || [];
+      $("#panel-chat")?.classList.remove("desktop-empty");
       renderPeerHeader();
       renderMessages(true);
-      loadChats();
+      loadChats().catch(() => {});
+      if (isDesktopLayout()) {
+        setTimeout(() => $("#msg-input")?.focus(), 30);
+      }
     } catch (err) {
       toast(err.message);
-      showPanel("chats");
+      showPanel(state.listPanel || "chats");
     }
   }
 
@@ -705,6 +751,7 @@
 
   function renderMessages(scrollBottom = false) {
     const box = $("#messages");
+    if (!box) return;
     const prevH = box.scrollHeight;
     const prevTop = box.scrollTop;
     let html = "";

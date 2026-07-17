@@ -258,6 +258,7 @@ img { display: block; max-width: 100%; }
   flex-direction: column;
   background: var(--bg);
   z-index: 1;
+  min-height: 0;
 }
 
 .panel-overlay { z-index: 5; }
@@ -579,11 +580,16 @@ img { display: block; max-width: 100%; }
 .chat-peer-meta .status.online { color: var(--online); }
 
 .messages {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 12px 12px 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   background:
     radial-gradient(ellipse 100% 40% at 50% 0%, rgba(108, 140, 255, 0.06), transparent 60%),
     var(--bg);
@@ -993,7 +999,7 @@ img { display: block; max-width: 100%; }
 }
 
 /* Desktop polish */
-@media (min-width: 768px) {
+@media (min-width: 768px) and (max-width: 1023px) {
   .view-main {
     max-width: 480px;
     margin: 0 auto;
@@ -1002,37 +1008,121 @@ img { display: block; max-width: 100%; }
   }
 }
 
+/* Wide desktop: Telegram-like split view */
 @media (min-width: 1024px) {
   .view-main {
-    max-width: 920px;
+    max-width: 1100px;
+    width: 100%;
+    height: 100%;
+    height: 100dvh;
+    margin: 0 auto;
     display: grid;
-    grid-template-columns: 360px 1fr;
+    grid-template-columns: minmax(300px, 360px) 1fr;
+    grid-template-rows: 1fr;
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    overflow: hidden;
   }
 
+  /* Left column: chats / contacts */
   #panel-chats,
   #panel-contacts {
-    position: relative;
+    position: relative !important;
+    inset: auto !important;
+    grid-column: 1;
+    grid-row: 1;
+    height: 100%;
+    min-height: 0;
+    max-height: 100%;
     border-right: 1px solid var(--border);
+    z-index: 2;
   }
 
+  /* Right column: conversation */
   #panel-chat {
-    position: relative;
+    position: relative !important;
+    inset: auto !important;
+    grid-column: 2;
+    grid-row: 1;
+    height: 100%;
+    min-height: 0;
+    max-height: 100%;
+    z-index: 2;
+    display: flex !important;
+    flex-direction: column;
+  }
+
+  /* Empty right pane placeholder */
+  #panel-chat.desktop-empty .messages,
+  #panel-chat.desktop-empty .composer {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  #panel-chat.desktop-empty::before {
+    content: "Выберите чат слева";
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--text-muted);
+    font-size: 1.05rem;
+    background: var(--bg);
+    z-index: 3;
+    pointer-events: none;
+  }
+
+  #panel-chat.hidden {
+    /* still occupy right column as empty state */
     display: flex !important;
   }
 
-  #panel-chat.hidden-desktop-empty::after {
-    content: "Выберите чат";
+  #panel-chat.hidden:not(.desktop-empty)::before {
+    content: "Выберите чат слева";
     position: absolute;
     inset: 0;
     display: grid;
     place-items: center;
     color: var(--text-muted);
     background: var(--bg);
+    z-index: 3;
+    pointer-events: none;
   }
 
+  /* Overlays only over left column (or full if needed) */
   .panel-overlay {
-    position: absolute;
+    position: absolute !important;
     left: 0;
-    width: 360px;
+    top: 0;
+    bottom: 0;
+    width: min(360px, 100%);
+    z-index: 10;
+  }
+
+  /* Hide back button on desktop split view */
+  #btn-back-chats {
+    display: none;
+  }
+
+  .list {
+    /* tabbar still at bottom of left column */
+    padding-bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 8px);
+  }
+
+  #panel-chat .messages {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  #panel-chat .composer {
+    flex-shrink: 0;
+    position: relative;
+    z-index: 5;
+  }
+
+  /* Highlight selected chat row */
+  .row.active-chat {
+    background: var(--bg-hover);
   }
 }
