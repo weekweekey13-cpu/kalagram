@@ -981,31 +981,12 @@ img { display: block; max-width: 100%; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 8px;
-  position: absolute;
-  left: 8px;
-  right: 56px; /* leave mic free under finger */
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 5;
-  background: var(--bg-elevated);
-  border-radius: var(--radius-pill);
-  /* do not steal touches from mic */
-  pointer-events: none;
-}
-
-.record-bar .rec-cancel,
-.record-bar .send-btn {
+  padding: 4px 2px;
+  width: 100%;
   pointer-events: auto;
 }
 
 .record-bar.hidden { display: none; }
-
-.composer.is-recording .composer-inner textarea,
-.composer.is-recording .composer-inner .send-btn {
-  visibility: hidden;
-  pointer-events: none;
-}
 
 .rec-wave {
   flex: 1;

@@ -1537,16 +1537,22 @@
     ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
   }
 
-  // ── Voice recording (iOS-first) ──────────────────────
-  // Hold mic → record, release → send.
-  // Mic stream kept alive whole session → OS asks permission only once.
+  // ── Voice recording (iOS PWA) ──────────────────────
+  // TAP mic → start, TAP send (or mic again) → send. Cancel discards.
+  // Hold is unreliable on iPhone (permission + touchcancel).
+  // Mic stream stays open entire session → permission asked once.
   const MIN_VOICE_SEC = 0.5;
   const MAX_VOICE_SEC = 120;
   const MIC_OK_KEY = "kalagram_mic_ok";
   let sharedAudioCtx = null;
-  let holdActive = false; // finger is down
-  let holdStarting = false; // awaiting getUserMedia / start
-  let holdTouchId = null;
+  let micBusy = false;
+
+  function isIOSDevice() {
+    return (
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+    );
+  }
 
   function micBlockReason() {
     const isLocal =
@@ -1554,15 +1560,10 @@
       location.hostname === "127.0.0.1" ||
       location.hostname === "[::1]";
     if (!window.isSecureContext && !isLocal) {
-      const host = location.host || "IP:8000";
-      return (
-        "Микрофон только по HTTPS. Откройте https://" +
-        host.replace(/^http:\/\//, "") +
-        " (не http). На iPhone: «Дополнительно» → перейти на сайт"
-      );
+      return "Микрофон только по HTTPS / с иконки Домой";
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return "Браузер не даёт API микрофона. Откройте Калаграм с Домой (PWA)";
+      return "Нет доступа к микрофону. Откройте Калаграм с Домой";
     }
     return null;
   }
@@ -1607,9 +1608,7 @@
       }
     }
     if (sharedAudioCtx.state === "suspended") {
-      try {
-        sharedAudioCtx.resume();
-      } catch {}
+      sharedAudioCtx.resume().catch(() => {});
     }
     return sharedAudioCtx;
   }
@@ -1626,31 +1625,17 @@
     } catch {}
   }
 
-  /** Get mic once and KEEP tracks alive (never stop until logout). */
+  /** Open mic once; NEVER stop tracks until logout (no re-prompt). */
   async function ensureMicStream() {
     if (micStreamIsLive()) {
       markMicGranted();
       return state.micStream;
     }
-    // dead stream object — drop without stop if already ended
     state.micStream = null;
-
-    // Prefer simple constraints on iOS
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e1) {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
-    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     state.micStream = stream;
     markMicGranted();
     stream.getAudioTracks().forEach((t) => {
-      // keep enabled; if OS ends track, clear cache
       t.enabled = true;
       t.onended = () => {
         if (state.micStream === stream) state.micStream = null;
@@ -1660,7 +1645,7 @@
   }
 
   function releaseMicStream() {
-    abortRecordingInternal(true);
+    stopRecording(true);
     if (state.micStream) {
       try {
         state.micStream.getTracks().forEach((t) => t.stop());
@@ -1683,7 +1668,6 @@
       "audio/mp4;codecs=mp4a.40.2",
       "audio/webm;codecs=opus",
       "audio/webm",
-      "audio/ogg;codecs=opus",
     ];
     for (const t of types) {
       try {
@@ -1694,57 +1678,54 @@
   }
 
   function showRecordUI() {
+    const main = $("#composer-main");
     const bar = $("#record-bar");
+    if (main) main.classList.add("hidden");
     if (bar) bar.classList.remove("hidden");
-    const wrap = $(".composer");
-    if (wrap) wrap.classList.add("is-recording");
     const mic = $("#btn-mic");
     if (mic) mic.classList.add("recording");
     const t = $("#rec-time");
     if (t) t.textContent = "0:00";
     const hint = $("#rec-hint");
-    if (hint) hint.textContent = "Отпустите — отправить";
+    if (hint) hint.textContent = "Говорите… затем ✓";
     clearInterval(state.recordTimer);
     state.recordTimer = setInterval(() => {
       const sec = (Date.now() - state.recordStart) / 1000;
       if (t) t.textContent = formatDuration(sec);
-      if (sec >= MAX_VOICE_SEC) finishHoldRecording(true);
-    }, 100);
+      if (sec >= MAX_VOICE_SEC) finishRecording(true);
+    }, 200);
   }
 
   function hideRecordUI() {
     clearInterval(state.recordTimer);
     state.recordTimer = null;
+    const main = $("#composer-main");
     const bar = $("#record-bar");
     if (bar) bar.classList.add("hidden");
-    const wrap = $(".composer");
-    if (wrap) wrap.classList.remove("is-recording");
+    if (main) main.classList.remove("hidden");
     const mic = $("#btn-mic");
     if (mic) mic.classList.remove("recording");
   }
 
-  function startPcmBackup(stream, ctx) {
-    try {
-      const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
-      const mute = ctx.createGain();
-      mute.gain.value = 0;
-      const chunks = [];
-      processor.onaudioprocess = (e) => {
-        if (!state.recordingActive) return;
-        chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-      };
-      source.connect(processor);
-      processor.connect(mute);
-      mute.connect(ctx.destination);
-      state.wavFallback = { ctx, source, processor, mute, chunks };
-    } catch (e) {
-      console.warn("pcm backup failed", e);
-      state.wavFallback = null;
-    }
+  function startPcmCapture(stream, ctx) {
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(2048, 1, 1);
+    const gain = ctx.createGain();
+    // tiny gain — iOS may skip fully-muted graphs
+    gain.gain.value = 0.001;
+    const chunks = [];
+    processor.onaudioprocess = (e) => {
+      if (!state.recordingActive) return;
+      chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    };
+    source.connect(processor);
+    processor.connect(gain);
+    gain.connect(ctx.destination);
+    state.wavFallback = { ctx, source, processor, mute: gain, chunks };
+    state.recordMode = "wav";
   }
 
-  function finishPcmBackup() {
+  function finishPcmCapture() {
     const w = state.wavFallback;
     if (!w) return null;
     try {
@@ -1757,7 +1738,7 @@
     state.wavFallback = null;
     if (!chunks.length) return null;
     const total = chunks.reduce((n, c) => n + c.length, 0);
-    if (total < 800) return null; // ~50ms @16k
+    if (total < 400) return null;
     const samples = new Float32Array(total);
     let off = 0;
     for (const c of chunks) {
@@ -1767,7 +1748,121 @@
     return encodeWav(downsampleMono(samples, rate, 16000), 16000);
   }
 
-  function abortRecordingInternal(discard) {
+  async function startRecording() {
+    if (!state.peer || state.recordingActive || state.sendingVoice || micBusy) {
+      return false;
+    }
+    const block = micBlockReason();
+    if (block) {
+      toast(block, 5000);
+      return false;
+    }
+
+    micBusy = true;
+    unlockAudioContext();
+
+    try {
+      const stream = await ensureMicStream();
+      const ctx = unlockAudioContext();
+      if (ctx && ctx.state === "suspended") {
+        try {
+          await ctx.resume();
+        } catch {}
+      }
+
+      state.recordChunks = [];
+      state.recordBlob = null;
+      state.recordStart = Date.now();
+      state.recordStream = stream;
+      state.recordingActive = true;
+      state.mediaRecorder = null;
+      state.wavFallback = null;
+      state.recordMode = null;
+
+      const mime = pickRecorderMime();
+      let started = false;
+      const ios = isIOSDevice();
+
+      // iPhone: PCM→WAV is the most reliable (MediaRecorder often empty in PWA)
+      // Desktop: MediaRecorder first, PCM backup
+      if (ios && ctx) {
+        try {
+          startPcmCapture(stream, ctx);
+          started = true;
+        } catch (e) {
+          console.warn("iOS PCM failed", e);
+        }
+      }
+
+      if (!started && typeof MediaRecorder !== "undefined") {
+        try {
+          const rec = mime
+            ? new MediaRecorder(stream, { mimeType: mime })
+            : new MediaRecorder(stream);
+          state.mediaRecorder = rec;
+          state.recordMode = "media";
+          rec.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) state.recordChunks.push(e.data);
+          };
+          rec.onerror = (ev) => console.warn("MediaRecorder error", ev);
+          try {
+            rec.start(250);
+          } catch {
+            rec.start();
+          }
+          started = true;
+        } catch (e) {
+          console.warn("MediaRecorder failed", e);
+          state.mediaRecorder = null;
+        }
+      }
+
+      if (!started && ctx) {
+        try {
+          startPcmCapture(stream, ctx);
+          started = true;
+        } catch (e) {
+          console.warn("PCM failed", e);
+        }
+      }
+
+      // Desktop: extra PCM backup alongside MR
+      if (!ios && started && state.mediaRecorder && ctx && !state.wavFallback) {
+        try {
+          startPcmCapture(stream, ctx);
+        } catch {}
+      }
+
+      if (!started) {
+        state.recordingActive = false;
+        toast("Запись не поддерживается на этом iPhone");
+        return false;
+      }
+
+      showRecordUI();
+      return true;
+    } catch (err) {
+      console.error(err);
+      state.recordingActive = false;
+      const name = err && err.name;
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        toast(
+          "Настройки iPhone → Калаграм → Микрофон → Вкл. Разрешите один раз.",
+          6000
+        );
+      } else if (name === "NotFoundError") {
+        toast("Микрофон не найден");
+      } else {
+        toast("Микрофон: " + (err.message || name || "ошибка"), 4000);
+      }
+      return false;
+    } finally {
+      micBusy = false;
+    }
+  }
+
+  function stopRecording(discard) {
+    // cancel without upload
     state.recordingActive = false;
     const rec = state.mediaRecorder;
     if (rec) {
@@ -1780,158 +1875,65 @@
     state.recordBlob = null;
     if (state.wavFallback) {
       try {
-        finishPcmBackup();
+        finishPcmCapture();
       } catch {
         state.wavFallback = null;
       }
     }
     state.recordMode = null;
-    state.recordReady = false;
-    if (discard) hideRecordUI();
-  }
-
-  async function startRecording() {
-    if (!state.peer || state.recordingActive || state.sendingVoice) return false;
-    const block = micBlockReason();
-    if (block) {
-      toast(block, 5000);
-      return false;
-    }
-
-    const ctx = unlockAudioContext();
-
-    try {
-      const stream = await ensureMicStream();
-      if (ctx && ctx.state === "suspended") {
-        try {
-          await ctx.resume();
-        } catch {}
-      }
-
-      state.recordChunks = [];
-      state.recordBlob = null;
-      state.recordDuration = 0;
-      state.recordStart = Date.now();
-      state.recordStream = stream;
-      state.recordingActive = true;
-      state.recordReady = false;
-      state.mediaRecorder = null;
-      state.wavFallback = null;
-
-      // 1) MediaRecorder (best on iPhone → m4a)
-      const mime = pickRecorderMime();
-      if (typeof MediaRecorder !== "undefined") {
-        try {
-          const rec = mime
-            ? new MediaRecorder(stream, { mimeType: mime })
-            : new MediaRecorder(stream);
-          state.mediaRecorder = rec;
-          state.recordMode = "media";
-          rec.ondataavailable = (e) => {
-            if (e.data && e.data.size > 0) state.recordChunks.push(e.data);
-          };
-          // No timeslice on iOS — one blob on stop is more reliable
-          rec.start();
-          state.recordReady = true;
-        } catch (e) {
-          console.warn("MediaRecorder start failed", e);
-          state.mediaRecorder = null;
-        }
-      }
-
-      // 2) PCM backup (desktop / if MR empty)
-      if (ctx) startPcmBackup(stream, ctx);
-      if (!state.mediaRecorder && !state.wavFallback) {
-        state.recordingActive = false;
-        toast("Запись не поддерживается");
-        return false;
-      }
-
-      showRecordUI();
-      return true;
-    } catch (err) {
-      console.error(err);
-      state.recordingActive = false;
-      const name = err && err.name;
-      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-        toast(
-          "Разрешите микрофон: Настройки → Калаграм → Микрофон. Один раз — и всё.",
-          5500
-        );
-      } else if (name === "NotFoundError") {
-        toast("Микрофон не найден");
-      } else {
-        toast("Микрофон: " + (err.message || name || "ошибка"), 4000);
-      }
-      return false;
-    }
-  }
-
-  function stopRecording(discard) {
-    holdActive = false;
-    holdTouchId = null;
-    abortRecordingInternal(true);
+    hideRecordUI();
   }
 
   async function stopAndGetBlob() {
     const duration = Math.max(0, (Date.now() - state.recordStart) / 1000);
     let blob = null;
-    let mime = "audio/mp4";
 
     const rec = state.mediaRecorder;
     if (rec && rec.state !== "inactive") {
       await new Promise((resolve) => {
-        let settled = false;
-        const done = () => {
-          if (settled) return;
-          settled = true;
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
           resolve();
         };
-        rec.addEventListener("stop", () => setTimeout(done, 50), { once: true });
+        rec.addEventListener("stop", () => setTimeout(finish, 80), { once: true });
         try {
-          if (typeof rec.requestData === "function") {
-            try {
-              rec.requestData();
-            } catch {}
-          }
+          try {
+            rec.requestData && rec.requestData();
+          } catch {}
           rec.stop();
         } catch {
-          done();
+          finish();
         }
-        setTimeout(done, 2000);
+        setTimeout(finish, 2500);
       });
     }
 
-    const type =
-      (rec && rec.mimeType) || pickRecorderMime() || "audio/mp4";
+    const type = (rec && rec.mimeType) || pickRecorderMime() || "audio/mp4";
     if (state.recordChunks.length) {
       blob = new Blob(state.recordChunks, { type });
-      mime = type;
     }
 
-    // fallback to PCM if MediaRecorder empty
-    if (!blob || blob.size < 100) {
-      const wav = finishPcmBackup();
-      if (wav && wav.size > 100) {
-        blob = wav;
-        mime = "audio/wav";
-      }
-    } else {
+    if ((!blob || blob.size < 100) && state.wavFallback) {
+      const wav = finishPcmCapture();
+      if (wav && wav.size >= 100) blob = wav;
+    } else if (state.wavFallback) {
       try {
-        finishPcmBackup();
+        finishPcmCapture();
       } catch {
         state.wavFallback = null;
       }
     }
 
+    // Last resort on iOS: if MR gave almost-empty, try one more PCM-only rec? no — already done
+
     state.mediaRecorder = null;
     state.recordChunks = [];
     state.recordBlob = null;
     state.recordingActive = false;
-    state.recordReady = false;
     state.recordMode = null;
-    // micStream stays alive — no second permission prompt
-    return { blob, duration, mime };
+    return { blob, duration };
   }
 
   async function sendVoiceBlob(blob, duration) {
@@ -1941,7 +1943,6 @@
       return;
     }
 
-    // Convert webm → wav for iPhone playback when needed
     let out = blob;
     const t0 = (blob.type || "").toLowerCase();
     if (t0.includes("webm") || t0.includes("ogg")) {
@@ -1957,11 +1958,9 @@
         ? "m4a"
         : type.includes("mpeg") || type.includes("mp3")
           ? "mp3"
-          : type.includes("ogg")
-            ? "ogg"
-            : type.includes("webm")
-              ? "webm"
-              : "m4a";
+          : type.includes("webm")
+            ? "webm"
+            : "m4a";
 
     const fd = new FormData();
     fd.append("file", out, `voice.${ext}`);
@@ -1980,12 +1979,10 @@
       body: fd,
       credentials: "include",
     });
-    let data = null;
+    let data = {};
     try {
       data = await res.json();
-    } catch {
-      data = {};
-    }
+    } catch {}
     if (!res.ok) {
       const d = data && data.detail;
       throw new Error(typeof d === "string" ? d : "Ошибка отправки");
@@ -1997,36 +1994,34 @@
     loadChats();
   }
 
-  async function finishHoldRecording(forceSend) {
+  async function finishRecording(forceSend) {
     if (state.sendingVoice) return;
-    holdActive = false;
-    holdTouchId = null;
-
     if (!state.recordingActive && !state.mediaRecorder && !state.wavFallback) {
       hideRecordUI();
       return;
     }
 
     state.sendingVoice = true;
-    hideRecordUI();
-
     try {
-      // brief pause so last frames land
-      await new Promise((r) => setTimeout(r, 120));
+      await new Promise((r) => setTimeout(r, 150));
       const { blob, duration } = await stopAndGetBlob();
+      hideRecordUI();
 
       if (!forceSend && duration < MIN_VOICE_SEC) {
-        toast("Минимум 0.5 сек");
+        toast("Минимум 0.5 сек — запишите ещё раз");
         return;
       }
       if (!blob || blob.size < 80) {
-        console.warn("voice empty", duration, blob && blob.size);
-        toast("Не записалось. Зажмите и говорите 1–2 сек");
+        // iOS MediaRecorder empty → retry with PCM only next time
+        console.warn("empty voice", { duration, size: blob && blob.size });
+        toast("Пустая запись. Нажмите микрофон, говорите, затем ✓", 4500);
         return;
       }
+      toast("Отправка…", 1200);
       await sendVoiceBlob(blob, duration);
     } catch (err) {
       console.error(err);
+      hideRecordUI();
       toast(err.message || "Не удалось отправить");
     } finally {
       state.sendingVoice = false;
@@ -2034,118 +2029,64 @@
     }
   }
 
+  // aliases used elsewhere
+  async function finishHoldRecording(force) {
+    return finishRecording(force !== false);
+  }
   async function sendVoiceRecording() {
-    await finishHoldRecording(true);
+    return finishRecording(true);
   }
 
   /**
-   * iOS: touchstart/touchend are the reliable hold gesture.
-   * Desktop: mouse/pointer fallback.
-   * Mic stream is opened once and never stopped (no re-prompt).
+   * Tap mic = start recording.
+   * Tap send (✓) = stop & send.
+   * Tap cancel = discard.
+   * Works on iPhone PWA from Home Screen.
    */
   function bindMicHold() {
     const btn = $("#btn-mic");
     if (!btn || btn._micBound) return;
     btn._micBound = true;
+    let lastTouchAt = 0;
 
-    const beginHold = async (fromTouch) => {
+    const onMicActivate = async () => {
       if (!state.peer) {
         toast("Откройте чат");
         return;
       }
-      if (state.sendingVoice || holdStarting || state.recordingActive) return;
+      if (state.sendingVoice || micBusy) return;
 
-      holdActive = true;
-      holdStarting = true;
-      unlockAudioContext();
-      // immediate visual feedback
-      btn.classList.add("recording");
-
-      try {
-        const ok = await startRecording();
-        holdStarting = false;
-        if (!ok) {
-          holdActive = false;
-          btn.classList.remove("recording");
-          return;
-        }
-        // User released while permission dialog was open
-        if (!holdActive) {
-          const elapsed = (Date.now() - state.recordStart) / 1000;
-          if (elapsed < MIN_VOICE_SEC) {
-            stopRecording(true);
-            toast("Микрофон разрешён ✓  Зажмите ещё раз и говорите", 4000);
-          } else {
-            await finishHoldRecording(false);
-          }
-        }
-      } catch (e) {
-        holdStarting = false;
-        holdActive = false;
-        btn.classList.remove("recording");
-        console.error(e);
-      }
-    };
-
-    const endHold = () => {
-      if (holdStarting) {
-        // still opening mic — mark released; beginHold will handle
-        holdActive = false;
+      // Already recording → send
+      if (state.recordingActive) {
+        await finishRecording(true);
         return;
       }
-      if (!holdActive && !state.recordingActive) return;
-      holdActive = false;
-      if (state.sendingVoice) return;
-      if (state.recordingActive || state.mediaRecorder || state.wavFallback) {
-        finishHoldRecording(false);
+
+      unlockAudioContext();
+      const ok = await startRecording();
+      if (ok) {
+        toast("Запись… нажмите синюю ✓ чтобы отправить", 2800);
       }
     };
 
-    // ── Touch (iPhone) ──
+    // iOS: touchend (prevent ghost click)
     btn.addEventListener(
-      "touchstart",
+      "touchend",
       (e) => {
-        if (e.touches && e.touches.length > 1) return;
+        lastTouchAt = Date.now();
         if (e.cancelable) e.preventDefault();
-        const t = e.changedTouches && e.changedTouches[0];
-        holdTouchId = t ? t.identifier : 0;
-        beginHold(true);
+        onMicActivate();
       },
       { passive: false }
     );
 
-    const onTouchEnd = (e) => {
-      if (holdTouchId == null) {
-        // still accept if we were holding
-        if (holdActive || state.recordingActive) endHold();
+    // Desktop / fallback
+    btn.addEventListener("click", (e) => {
+      if (Date.now() - lastTouchAt < 600) {
+        e.preventDefault();
         return;
       }
-      let match = false;
-      const list = e.changedTouches || [];
-      for (let i = 0; i < list.length; i++) {
-        if (list[i].identifier === holdTouchId) match = true;
-      }
-      if (!match && list.length) return;
-      holdTouchId = null;
-      if (e.cancelable) e.preventDefault();
-      endHold();
-    };
-
-    btn.addEventListener("touchend", onTouchEnd, { passive: false });
-    btn.addEventListener("touchcancel", onTouchEnd, { passive: false });
-    // also on document — finger may slide off button
-    document.addEventListener("touchend", onTouchEnd, { passive: false });
-    document.addEventListener("touchcancel", onTouchEnd, { passive: false });
-
-    // ── Mouse / desktop ──
-    btn.addEventListener("mousedown", (e) => {
-      if (e.button !== 0) return;
-      // ignore synthetic mouse after touch
-      if (e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
-      beginHold(false);
-    });
-    window.addEventListener("mouseup", () => {
-      if (holdActive || state.recordingActive) endHold();
+      onMicActivate();
     });
 
     btn.addEventListener("contextmenu", (e) => e.preventDefault());
