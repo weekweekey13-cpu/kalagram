@@ -544,6 +544,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 
+@app.get("/api/health")
+async def health():
+    """Public status: which DB backend is active (no secrets)."""
+    return {
+        "ok": True,
+        "app": "Калаграм",
+        "database": "postgres" if USE_PG else "sqlite",
+        "persistent": bool(USE_PG),
+        "hint": (
+            "Данные на Neon — переживают перезапуск"
+            if USE_PG
+            else "SQLite на временном диске Render — после сна/деплоя данные могут пропасть. Добавьте DATABASE_URL (Neon)."
+        ),
+    }
+
+
 # ── auth routes ─────────────────────────────────────────────────
 @app.post("/api/register")
 async def register(body: RegisterIn):
