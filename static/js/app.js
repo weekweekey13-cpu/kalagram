@@ -2196,7 +2196,6 @@
 
       Voice.phase = "recording";
       showRecordUI();
-      toast("Запись… нажмите синюю ✓", 2500);
       return true;
     } catch (err) {
       if (myGen !== Voice.gen) return false;
