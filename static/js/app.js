@@ -5,6 +5,13 @@
 (() => {
   "use strict";
 
+  // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
+  const APP_VERSION = "1.12";
+  const APP_UPDATE_NOTES =
+    "Обнова 1.12 готова ✓\n• Голосовые: микрофон → говори → ✓\n• Можно писать";
+  const VERSION_SEEN_KEY = "kalagram_seen_version";
+  const UPDATES_KEY = "kalagram_updates";
+
   const TOKEN_KEY = "kalagram_token";
   const TOKEN_KEY_LEGACY = "msg_token";
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -83,6 +90,8 @@
     recordPointerId: null,
     sendingVoice: false,
     recordReady: false, // true once MediaRecorder actually started
+    appVersion: APP_VERSION,
+    systemChat: false, // viewing Калаграм update inbox
   };
 
   // ── API ──────────────────────────────────
@@ -591,6 +600,8 @@
     if (!state.token) state.token = readStoredToken();
     if (!state.token) {
       showView("auth");
+      // still check version so guest sees update after deploy
+      checkAppUpdate().catch(() => {});
       return;
     }
     try {
@@ -604,6 +615,7 @@
       setAvatar($("#me-avatar-btn"), me);
       await Promise.all([loadChats(), loadContacts()]);
       connectWs();
+      await checkAppUpdate();
       // soft refresh every 6h while open
       clearInterval(bootstrap._refresh);
       bootstrap._refresh = setInterval(() => {
@@ -612,12 +624,159 @@
             if (d?.token) setSession(d.token, d.user || state.me);
           })
           .catch(() => {});
+        checkAppUpdate().catch(() => {});
       }, 6 * 60 * 60 * 1000);
     } catch {
       // only wipe session if server really rejects auth
       setSession(null, null);
       showView("auth");
     }
+  }
+
+  // ── App updates («SMS» from Калаграм) ────
+  function getUpdateInbox() {
+    try {
+      return JSON.parse(localStorage.getItem(UPDATES_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  }
+
+  function saveUpdateInbox(list) {
+    try {
+      localStorage.setItem(UPDATES_KEY, JSON.stringify(list.slice(0, 30)));
+    } catch {}
+  }
+
+  function pushUpdateNotice(version, text) {
+    const list = getUpdateInbox();
+    if (list.some((x) => x.version === version)) return false;
+    list.unshift({
+      version,
+      text: text || `Обнова ${version} готова ✓`,
+      at: Date.now() / 1000,
+      read: false,
+    });
+    saveUpdateInbox(list);
+    return true;
+  }
+
+  function showUpdateBanner(version, text) {
+    let el = $("#update-banner");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "update-banner";
+      el.className = "update-banner";
+      el.innerHTML = `
+        <div class="update-banner-inner">
+          <div class="update-banner-title"></div>
+          <div class="update-banner-body"></div>
+          <button type="button" class="update-banner-ok">Понятно</button>
+        </div>`;
+      document.body.appendChild(el);
+      el.querySelector(".update-banner-ok").addEventListener("click", () => {
+        el.classList.add("hidden");
+      });
+    }
+    el.querySelector(".update-banner-title").textContent = `Калаграм ${version}`;
+    el.querySelector(".update-banner-body").textContent = (text || "")
+      .split("\n")[0]
+      .slice(0, 160);
+    el.classList.remove("hidden");
+    clearTimeout(showUpdateBanner._t);
+    showUpdateBanner._t = setTimeout(() => el.classList.add("hidden"), 12000);
+  }
+
+  async function checkAppUpdate() {
+    let version = APP_VERSION;
+    let notes = APP_UPDATE_NOTES;
+    try {
+      const h = await fetch("/api/health?_=" + Date.now(), {
+        cache: "no-store",
+      }).then((r) => r.json());
+      if (h && h.version) version = String(h.version);
+      if (h && h.update_notes) notes = String(h.update_notes);
+    } catch {}
+    state.appVersion = version;
+    let seen = null;
+    try {
+      seen = localStorage.getItem(VERSION_SEEN_KEY);
+    } catch {}
+    const isNew = seen !== version;
+    if (isNew) {
+      pushUpdateNotice(version, notes);
+      try {
+        localStorage.setItem(VERSION_SEEN_KEY, version);
+      } catch {}
+      toast(`Калаграм ${version} — обнова уже здесь ✓`, 5000);
+      showUpdateBanner(version, notes);
+      // try SW update so next open gets fresh assets
+      try {
+        if (navigator.serviceWorker) {
+          const reg = await navigator.serviceWorker.getRegistration();
+          if (reg) reg.update().catch(() => {});
+        }
+      } catch {}
+    }
+    // refresh chat list to show Калаграм inbox row
+    if (state.me) renderChats();
+    return { version, isNew };
+  }
+
+  function openSystemUpdates() {
+    stopRecording(true);
+    exitSelectMode();
+    const inbox = getUpdateInbox();
+    inbox.forEach((x) => {
+      x.read = true;
+    });
+    saveUpdateInbox(inbox);
+    state.systemChat = true;
+    state.isGroup = false;
+    state.peer = {
+      id: 0,
+      display_name: "Калаграм",
+      nick: "kalagram",
+      is_system: true,
+      online: true,
+    };
+    state.messages = inbox.map((u, i) => ({
+      id: -(1000 + i),
+      msg_type: "text",
+      text: u.text,
+      created_at: u.at,
+      sender_id: 0,
+      sender: { display_name: "Калаграм", nick: "kalagram" },
+    }));
+    if (!state.messages.length) {
+      state.messages = [
+        {
+          id: -1,
+          msg_type: "text",
+          text: `Вы на версии ${state.appVersion || APP_VERSION}. Когда выложу новую — придёт сообщение сюда.`,
+          created_at: Date.now() / 1000,
+          sender_id: 0,
+        },
+      ];
+    }
+    showPanel("chat");
+    $("#panel-chat")?.classList.remove("desktop-empty");
+    renderPeerHeader();
+    const st = $("#peer-status");
+    if (st) {
+      st.textContent = "служебные сообщения";
+      st.classList.remove("online");
+    }
+    renderMessages(true);
+    const comp = document.querySelector(".composer");
+    if (comp) comp.classList.add("hidden");
+  }
+
+  function leaveSystemChatIfNeeded() {
+    if (!state.systemChat) return;
+    state.systemChat = false;
+    const comp = document.querySelector(".composer");
+    if (comp) comp.classList.remove("hidden");
   }
 
   // ── Chats ────────────────────────────────
@@ -636,7 +795,40 @@
         return n.includes(q) || (c.last_message?.text || "").toLowerCase().includes(q);
       });
     }
-    if (!items.length) {
+
+    const updates = getUpdateInbox();
+    const latestUp = updates[0];
+    const showSys =
+      !q ||
+      "калаграм".includes(q) ||
+      "kalagram".includes(q) ||
+      (latestUp && (latestUp.text || "").toLowerCase().includes(q));
+    const unreadSys = updates.filter((u) => !u.read).length;
+
+    let sysHtml = "";
+    if (showSys && (latestUp || !q)) {
+      const preview = latestUp
+        ? (latestUp.text || "").split("\n")[0]
+        : `Версия ${state.appVersion || APP_VERSION}`;
+      const time = latestUp ? formatTime(latestUp.at) : "";
+      sysHtml = `
+        <button type="button" class="row row-system" data-system="1" data-key="system:kalagram">
+          <span class="chat-sel-check" aria-hidden="true"></span>
+          <div class="avatar avatar-md avatar-system" data-av="sys-kalagram">К</div>
+          <div class="row-body">
+            <div class="row-top">
+              <div class="row-name">Калаграм <span class="group-badge">сервис</span></div>
+              <div class="row-time">${time}</div>
+            </div>
+            <div class="row-bottom">
+              <div class="row-preview">${escapeHtml(preview)}</div>
+              ${unreadSys ? `<span class="badge">${unreadSys}</span>` : ""}
+            </div>
+          </div>
+        </button>`;
+    }
+
+    if (!items.length && !sysHtml) {
       list.innerHTML = `
         <div class="empty">
           <strong>${q ? "Ничего не найдено" : "Пока нет чатов"}</strong>
@@ -644,7 +836,7 @@
         </div>`;
       return;
     }
-    list.innerHTML = items
+    const rowsHtml = items
       .map((c) => {
         const isGroup = c.kind === "group" || c.peer?.is_group;
         const mine = c.last_message?.sender_id === state.me.id;
@@ -670,14 +862,23 @@
         </button>`;
       })
       .join("");
+    list.innerHTML = sysHtml + rowsHtml;
     items.forEach((c) => {
       const isGroup = c.kind === "group" || c.peer?.is_group;
       const avKey = isGroup ? `g-${c.peer.id}` : `u-${c.peer.id}`;
       setAvatar(list.querySelector(`[data-av="${avKey}"]`), c.peer, { isGroup });
     });
+    const sysAv = list.querySelector(`[data-av="sys-kalagram"]`);
+    if (sysAv && !sysAv.querySelector("span.avatar-initials")) {
+      sysAv.innerHTML = '<span class="avatar-initials">К</span>';
+    }
     list.classList.toggle("select-mode", !!state.chatSelectMode);
     list.querySelectorAll(".row").forEach((row) => {
       row.addEventListener("click", (e) => {
+        if (row.dataset.system === "1") {
+          openSystemUpdates();
+          return;
+        }
         if (state.chatSelectMode) {
           e.preventDefault();
           e.stopPropagation();
@@ -689,7 +890,7 @@
         if (+row.dataset.group) openGroupChat(+row.dataset.id);
         else openChat(+row.dataset.id);
       });
-      if (state.peer) {
+      if (state.peer && !state.systemChat) {
         const isG = state.isGroup || state.peer.is_group;
         if (isG && +row.dataset.group && +row.dataset.id === state.peer.id) {
           row.classList.add("active-chat");
@@ -885,6 +1086,7 @@
   async function openChat(peerId) {
     stopRecording(true);
     exitSelectMode();
+    leaveSystemChatIfNeeded();
     state.isGroup = false;
     showPanel("chat");
     const box = $("#messages");
@@ -910,6 +1112,7 @@
   async function openGroupChat(groupId) {
     stopRecording(true);
     exitSelectMode();
+    leaveSystemChatIfNeeded();
     state.isGroup = true;
     showPanel("chat");
     const box = $("#messages");
@@ -1190,6 +1393,7 @@
     list.addEventListener("pointerdown", (e) => {
       const row = e.target.closest(".row");
       if (!row || !row.dataset.key) return;
+      if (row.dataset.system === "1") return;
       if (e.target.closest(".select-action, button")) return;
 
       if (state.chatSelectMode) {
@@ -1274,7 +1478,7 @@
             </div>
           </div>`;
       } else {
-        body = `<div class="text">${escapeHtml(m.text)}</div>`;
+        body = `<div class="text">${formatMessageText(m.text)}</div>`;
       }
       html += `
         <div class="bubble ${mine ? "me" : "them"} mine-selectable ${selected ? "selected" : ""}" data-id="${m.id}">
@@ -1538,21 +1742,13 @@
   }
 
   // ── Voice recording (iOS PWA) ──────────────────────
-  // TAP mic → start, TAP send (or mic again) → send. Cancel discards.
-  // Hold is unreliable on iPhone (permission + touchcancel).
-  // Mic stream stays open entire session → permission asked once.
+  // Tap mic → start. Tap ✓ → send. Cancel discards.
+  // MediaRecorder (m4a) primary — PCM/ScriptProcessor is broken on many iPhones.
+  // Mic stream kept alive → permission once per install.
   const MIN_VOICE_SEC = 0.5;
   const MAX_VOICE_SEC = 120;
   const MIC_OK_KEY = "kalagram_mic_ok";
-  let sharedAudioCtx = null;
   let micBusy = false;
-
-  function isIOSDevice() {
-    return (
-      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
-    );
-  }
 
   function micBlockReason() {
     const isLocal =
@@ -1563,54 +1759,12 @@
       return "Микрофон только по HTTPS / с иконки Домой";
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return "Нет доступа к микрофону. Откройте Калаграм с Домой";
+      return "Нет микрофона. Откройте Калаграм с Домой (не Safari)";
+    }
+    if (typeof MediaRecorder === "undefined") {
+      return "Запись не поддерживается. Обновите iOS";
     }
     return null;
-  }
-
-  function encodeWav(samples, sampleRate) {
-    const n = samples.length;
-    const buffer = new ArrayBuffer(44 + n * 2);
-    const view = new DataView(buffer);
-    const writeStr = (off, s) => {
-      for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
-    };
-    writeStr(0, "RIFF");
-    view.setUint32(4, 36 + n * 2, true);
-    writeStr(8, "WAVE");
-    writeStr(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeStr(36, "data");
-    view.setUint32(40, n * 2, true);
-    let offset = 44;
-    for (let i = 0; i < n; i++) {
-      const s = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      offset += 2;
-    }
-    return new Blob([buffer], { type: "audio/wav" });
-  }
-
-  function unlockAudioContext() {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return null;
-    if (!sharedAudioCtx || sharedAudioCtx.state === "closed") {
-      try {
-        sharedAudioCtx = new AC();
-      } catch {
-        return null;
-      }
-    }
-    if (sharedAudioCtx.state === "suspended") {
-      sharedAudioCtx.resume().catch(() => {});
-    }
-    return sharedAudioCtx;
   }
 
   function micStreamIsLive() {
@@ -1625,14 +1779,24 @@
     } catch {}
   }
 
-  /** Open mic once; NEVER stop tracks until logout (no re-prompt). */
+  /** Open mic once; never stop tracks until logout. */
   async function ensureMicStream() {
     if (micStreamIsLive()) {
       markMicGranted();
+      state.micStream.getAudioTracks().forEach((t) => {
+        t.enabled = true;
+      });
       return state.micStream;
     }
-    state.micStream = null;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (state.micStream) {
+      try {
+        state.micStream.getTracks().forEach((t) => t.stop());
+      } catch {}
+      state.micStream = null;
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+    });
     state.micStream = stream;
     markMicGranted();
     stream.getAudioTracks().forEach((t) => {
@@ -1652,16 +1816,11 @@
       } catch {}
       state.micStream = null;
     }
-    if (sharedAudioCtx && sharedAudioCtx.state !== "closed") {
-      try {
-        sharedAudioCtx.close();
-      } catch {}
-      sharedAudioCtx = null;
-    }
   }
 
   function pickRecorderMime() {
     if (typeof MediaRecorder === "undefined") return "";
+    // iOS only really supports mp4/aac for MediaRecorder
     const types = [
       "audio/mp4",
       "audio/aac",
@@ -1682,8 +1841,6 @@
     const bar = $("#record-bar");
     if (main) main.classList.add("hidden");
     if (bar) bar.classList.remove("hidden");
-    const mic = $("#btn-mic");
-    if (mic) mic.classList.add("recording");
     const t = $("#rec-time");
     if (t) t.textContent = "0:00";
     const hint = $("#rec-hint");
@@ -1703,55 +1860,32 @@
     const bar = $("#record-bar");
     if (bar) bar.classList.add("hidden");
     if (main) main.classList.remove("hidden");
-    const mic = $("#btn-mic");
-    if (mic) mic.classList.remove("recording");
   }
 
-  function startPcmCapture(stream, ctx) {
-    const source = ctx.createMediaStreamSource(stream);
-    const processor = ctx.createScriptProcessor(2048, 1, 1);
-    const gain = ctx.createGain();
-    // tiny gain — iOS may skip fully-muted graphs
-    gain.gain.value = 0.001;
-    const chunks = [];
-    processor.onaudioprocess = (e) => {
-      if (!state.recordingActive) return;
-      chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-    };
-    source.connect(processor);
-    processor.connect(gain);
-    gain.connect(ctx.destination);
-    state.wavFallback = { ctx, source, processor, mute: gain, chunks };
-    state.recordMode = "wav";
-  }
-
-  function finishPcmCapture() {
-    const w = state.wavFallback;
-    if (!w) return null;
-    try {
-      w.processor && w.processor.disconnect();
-      w.source && w.source.disconnect();
-      w.mute && w.mute.disconnect();
-    } catch {}
-    const chunks = w.chunks || [];
-    const rate = (w.ctx && w.ctx.sampleRate) || 44100;
-    state.wavFallback = null;
-    if (!chunks.length) return null;
-    const total = chunks.reduce((n, c) => n + c.length, 0);
-    if (total < 400) return null;
-    const samples = new Float32Array(total);
-    let off = 0;
-    for (const c of chunks) {
-      samples.set(c, off);
-      off += c.length;
+  function makeRecorder(stream) {
+    const mime = pickRecorderMime();
+    // try preferred mime, then default constructor
+    const attempts = mime ? [mime, ""] : [""];
+    let lastErr = null;
+    for (const m of attempts) {
+      try {
+        const rec = m
+          ? new MediaRecorder(stream, { mimeType: m })
+          : new MediaRecorder(stream);
+        return rec;
+      } catch (e) {
+        lastErr = e;
+      }
     }
-    return encodeWav(downsampleMono(samples, rate, 16000), 16000);
+    throw lastErr || new Error("MediaRecorder unavailable");
   }
 
   async function startRecording() {
-    if (!state.peer || state.recordingActive || state.sendingVoice || micBusy) {
+    if (!state.peer || state.systemChat) {
+      toast("Откройте обычный чат");
       return false;
     }
+    if (state.recordingActive || state.sendingVoice || micBusy) return false;
     const block = micBlockReason();
     if (block) {
       toast(block, 5000);
@@ -1759,95 +1893,48 @@
     }
 
     micBusy = true;
-    unlockAudioContext();
-
     try {
       const stream = await ensureMicStream();
-      const ctx = unlockAudioContext();
-      if (ctx && ctx.state === "suspended") {
-        try {
-          await ctx.resume();
-        } catch {}
-      }
+      // iOS: brief settle after getUserMedia / reuse
+      await new Promise((r) => setTimeout(r, 120));
 
       state.recordChunks = [];
       state.recordBlob = null;
       state.recordStart = Date.now();
       state.recordStream = stream;
-      state.recordingActive = true;
-      state.mediaRecorder = null;
       state.wavFallback = null;
-      state.recordMode = null;
+      state.recordMode = "media";
 
-      const mime = pickRecorderMime();
-      let started = false;
-      const ios = isIOSDevice();
-
-      // iPhone: PCM→WAV is the most reliable (MediaRecorder often empty in PWA)
-      // Desktop: MediaRecorder first, PCM backup
-      if (ios && ctx) {
-        try {
-          startPcmCapture(stream, ctx);
-          started = true;
-        } catch (e) {
-          console.warn("iOS PCM failed", e);
+      const rec = makeRecorder(stream);
+      state.mediaRecorder = rec;
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          state.recordChunks.push(e.data);
         }
+      };
+      rec.onerror = () => {
+        toast("Ошибка записи");
+      };
+
+      // timeslice: iOS delivers data while recording
+      try {
+        rec.start(200);
+      } catch {
+        rec.start();
       }
 
-      if (!started && typeof MediaRecorder !== "undefined") {
-        try {
-          const rec = mime
-            ? new MediaRecorder(stream, { mimeType: mime })
-            : new MediaRecorder(stream);
-          state.mediaRecorder = rec;
-          state.recordMode = "media";
-          rec.ondataavailable = (e) => {
-            if (e.data && e.data.size > 0) state.recordChunks.push(e.data);
-          };
-          rec.onerror = (ev) => console.warn("MediaRecorder error", ev);
-          try {
-            rec.start(250);
-          } catch {
-            rec.start();
-          }
-          started = true;
-        } catch (e) {
-          console.warn("MediaRecorder failed", e);
-          state.mediaRecorder = null;
-        }
-      }
-
-      if (!started && ctx) {
-        try {
-          startPcmCapture(stream, ctx);
-          started = true;
-        } catch (e) {
-          console.warn("PCM failed", e);
-        }
-      }
-
-      // Desktop: extra PCM backup alongside MR
-      if (!ios && started && state.mediaRecorder && ctx && !state.wavFallback) {
-        try {
-          startPcmCapture(stream, ctx);
-        } catch {}
-      }
-
-      if (!started) {
-        state.recordingActive = false;
-        toast("Запись не поддерживается на этом iPhone");
-        return false;
-      }
-
+      state.recordingActive = true;
+      state.recordReady = true;
       showRecordUI();
       return true;
     } catch (err) {
       console.error(err);
       state.recordingActive = false;
+      state.mediaRecorder = null;
       const name = err && err.name;
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
         toast(
-          "Настройки iPhone → Калаграм → Микрофон → Вкл. Разрешите один раз.",
+          "Настройки → Калаграм → Микрофон → Вкл (один раз)",
           6000
         );
       } else if (name === "NotFoundError") {
@@ -1862,7 +1949,6 @@
   }
 
   function stopRecording(discard) {
-    // cancel without upload
     state.recordingActive = false;
     const rec = state.mediaRecorder;
     if (rec) {
@@ -1873,22 +1959,16 @@
     state.mediaRecorder = null;
     state.recordChunks = [];
     state.recordBlob = null;
-    if (state.wavFallback) {
-      try {
-        finishPcmCapture();
-      } catch {
-        state.wavFallback = null;
-      }
-    }
     state.recordMode = null;
+    state.recordReady = false;
     hideRecordUI();
   }
 
   async function stopAndGetBlob() {
     const duration = Math.max(0, (Date.now() - state.recordStart) / 1000);
-    let blob = null;
-
     const rec = state.mediaRecorder;
+    const chunks = state.recordChunks;
+
     if (rec && rec.state !== "inactive") {
       await new Promise((resolve) => {
         let done = false;
@@ -1897,47 +1977,49 @@
           done = true;
           resolve();
         };
-        rec.addEventListener("stop", () => setTimeout(finish, 80), { once: true });
+        // dataavailable often fires right before stop on iOS
+        rec.addEventListener(
+          "dataavailable",
+          (e) => {
+            if (e.data && e.data.size > 0) chunks.push(e.data);
+          },
+          { once: false }
+        );
+        rec.addEventListener("stop", () => setTimeout(finish, 100), {
+          once: true,
+        });
         try {
-          try {
-            rec.requestData && rec.requestData();
-          } catch {}
+          if (typeof rec.requestData === "function") {
+            try {
+              rec.requestData();
+            } catch {}
+          }
           rec.stop();
         } catch {
           finish();
         }
-        setTimeout(finish, 2500);
+        setTimeout(finish, 3000);
       });
     }
 
-    const type = (rec && rec.mimeType) || pickRecorderMime() || "audio/mp4";
-    if (state.recordChunks.length) {
-      blob = new Blob(state.recordChunks, { type });
+    const type =
+      (rec && rec.mimeType) || pickRecorderMime() || "audio/mp4";
+    let blob = null;
+    if (chunks.length) {
+      blob = new Blob(chunks, { type: type || "audio/mp4" });
     }
-
-    if ((!blob || blob.size < 100) && state.wavFallback) {
-      const wav = finishPcmCapture();
-      if (wav && wav.size >= 100) blob = wav;
-    } else if (state.wavFallback) {
-      try {
-        finishPcmCapture();
-      } catch {
-        state.wavFallback = null;
-      }
-    }
-
-    // Last resort on iOS: if MR gave almost-empty, try one more PCM-only rec? no — already done
 
     state.mediaRecorder = null;
     state.recordChunks = [];
     state.recordBlob = null;
     state.recordingActive = false;
     state.recordMode = null;
-    return { blob, duration };
+    state.recordReady = false;
+    return { blob, duration, mime: type };
   }
 
   async function sendVoiceBlob(blob, duration) {
-    if (!state.peer || !blob) return;
+    if (!state.peer || !blob || state.systemChat) return;
     if (blob.size < 80) {
       toast("Слишком короткая запись");
       return;
@@ -1996,25 +2078,28 @@
 
   async function finishRecording(forceSend) {
     if (state.sendingVoice) return;
-    if (!state.recordingActive && !state.mediaRecorder && !state.wavFallback) {
+    if (!state.recordingActive && !state.mediaRecorder) {
       hideRecordUI();
       return;
     }
 
     state.sendingVoice = true;
     try {
-      await new Promise((r) => setTimeout(r, 150));
+      // let last timeslice flush
+      await new Promise((r) => setTimeout(r, 250));
       const { blob, duration } = await stopAndGetBlob();
       hideRecordUI();
 
-      if (!forceSend && duration < MIN_VOICE_SEC) {
-        toast("Минимум 0.5 сек — запишите ещё раз");
+      if (duration < MIN_VOICE_SEC && !forceSend) {
+        toast("Минимум 0.5 сек");
         return;
       }
       if (!blob || blob.size < 80) {
-        // iOS MediaRecorder empty → retry with PCM only next time
-        console.warn("empty voice", { duration, size: blob && blob.size });
-        toast("Пустая запись. Нажмите микрофон, говорите, затем ✓", 4500);
+        console.warn("empty voice", duration, blob && blob.size);
+        toast(
+          "Пустая запись. Нажмите 🎤, говорите 1–2 сек, затем синюю ✓",
+          5000
+        );
         return;
       }
       toast("Отправка…", 1200);
@@ -2029,7 +2114,6 @@
     }
   }
 
-  // aliases used elsewhere
   async function finishHoldRecording(force) {
     return finishRecording(force !== false);
   }
@@ -2037,12 +2121,6 @@
     return finishRecording(true);
   }
 
-  /**
-   * Tap mic = start recording.
-   * Tap send (✓) = stop & send.
-   * Tap cancel = discard.
-   * Works on iPhone PWA from Home Screen.
-   */
   function bindMicHold() {
     const btn = $("#btn-mic");
     if (!btn || btn._micBound) return;
@@ -2050,26 +2128,23 @@
     let lastTouchAt = 0;
 
     const onMicActivate = async () => {
-      if (!state.peer) {
-        toast("Откройте чат");
+      if (!state.peer || state.systemChat) {
+        toast("Откройте чат с человеком");
         return;
       }
       if (state.sendingVoice || micBusy) return;
 
-      // Already recording → send
       if (state.recordingActive) {
         await finishRecording(true);
         return;
       }
 
-      unlockAudioContext();
       const ok = await startRecording();
       if (ok) {
-        toast("Запись… нажмите синюю ✓ чтобы отправить", 2800);
+        toast("Запись… нажмите синюю ✓", 2500);
       }
     };
 
-    // iOS: touchend (prevent ghost click)
     btn.addEventListener(
       "touchend",
       (e) => {
@@ -2080,7 +2155,6 @@
       { passive: false }
     );
 
-    // Desktop / fallback
     btn.addEventListener("click", (e) => {
       if (Date.now() - lastTouchAt < 600) {
         e.preventDefault();
@@ -2293,6 +2367,10 @@
       .replace(/"/g, "&quot;");
   }
 
+  function formatMessageText(s) {
+    return escapeHtml(s).replace(/\n/g, "<br>");
+  }
+
   // ── Events ───────────────────────────────
   function bind() {
     $$(".auth-tab").forEach((tab) => {
@@ -2357,6 +2435,7 @@
     $("#btn-back-chats").addEventListener("click", () => {
       stopRecording(true);
       exitSelectMode();
+      leaveSystemChatIfNeeded();
       state.peer = null;
       state.isGroup = false;
       showPanel("chats");

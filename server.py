@@ -716,6 +716,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Калаграм", lifespan=lifespan)
 
+# Bump this on every user-facing release — client shows «SMS» from Калаграм
+APP_VERSION = "1.12"
+APP_UPDATE_NOTES = (
+    "Обнова 1.12 готова ✓\n"
+    "• Голосовые: нажми микрофон → говори → синяя ✓\n"
+    "• Разрешение на микрофон — один раз\n"
+    "• Можно пользоваться и писать"
+)
+
 
 @app.get("/api/health")
 async def health():
@@ -723,6 +732,8 @@ async def health():
     return {
         "ok": True,
         "app": "Калаграм",
+        "version": APP_VERSION,
+        "update_notes": APP_UPDATE_NOTES,
         "database": "postgres" if USE_PG else "sqlite",
         "persistent": bool(USE_PG),
         "push": True,

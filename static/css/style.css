@@ -1226,6 +1226,53 @@ img { display: block; max-width: 100%; }
 
 .install-card strong { color: var(--text); }
 
+/* System update banner + Kalagram service chat */
+.update-banner {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(100%, 480px);
+  z-index: 300;
+  padding: calc(10px + var(--safe-top)) 12px 0;
+  pointer-events: none;
+}
+.update-banner.hidden { display: none; }
+.update-banner-inner {
+  pointer-events: auto;
+  background: linear-gradient(135deg, rgba(91, 124, 250, 0.95), rgba(123, 92, 255, 0.95));
+  color: #fff;
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+.update-banner-title {
+  font-weight: 700;
+  font-size: 1rem;
+  margin-bottom: 4px;
+}
+.update-banner-body {
+  font-size: 0.88rem;
+  opacity: 0.95;
+  line-height: 1.35;
+  margin-bottom: 10px;
+}
+.update-banner-ok {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+.row-system .avatar-system {
+  background: linear-gradient(135deg, #5b7cfa, #7b5cff) !important;
+  color: #fff;
+  font-weight: 700;
+}
+.avatar-system .avatar-initials { color: #fff; }
+
 /* ── Toast ────────────────────────────────── */
 .toast {
   position: fixed;
