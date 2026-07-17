@@ -521,12 +521,16 @@ async def broadcast_message(msg: dict[str, Any], sender: dict[str, Any]) -> None
                 notify_ids.append(int(rid))
         await manager.send_to(sender["id"], event)
 
-    # iPhone/Android home-screen push (also when app is closed)
+    # iPhone/Android home-screen push — only when app is NOT in foreground
     if notify_ids:
         preview = msg.get("text") or ""
         if msg.get("msg_type") == "voice":
             preview = "🎤 Голосовое"
         elif msg.get("msg_type") == "system":
+            return
+        # Skip users currently looking at Калаграм (they get in-app banner instead)
+        push_ids = [uid for uid in notify_ids if not manager.is_app_active(uid)]
+        if not push_ids:
             return
         if len(preview) > 120:
             preview = preview[:117] + "…"
@@ -536,7 +540,7 @@ async def broadcast_message(msg: dict[str, Any], sender: dict[str, Any]) -> None
             "group_id": msg.get("group_id"),
             "is_group": bool(msg.get("group_id")),
         }
-        await push_notify_users(notify_ids, title, preview, data)
+        await push_notify_users(push_ids, title, preview, data)
 
 
 async def push_notify_users(
@@ -597,6 +601,8 @@ async def push_notify_users(
 class ConnectionManager:
     def __init__(self) -> None:
         self.active: dict[int, set[WebSocket]] = {}
+        # sockets that reported document visible (user is looking at the app)
+        self.foreground: dict[int, set[WebSocket]] = {}
         self.lock = asyncio.Lock()
 
     async def connect(self, user_id: int, ws: WebSocket) -> None:
@@ -611,6 +617,10 @@ class ConnectionManager:
                 self.active[user_id].discard(ws)
                 if not self.active[user_id]:
                     del self.active[user_id]
+            if user_id in self.foreground:
+                self.foreground[user_id].discard(ws)
+                if not self.foreground[user_id]:
+                    del self.foreground[user_id]
         still = self.is_online(user_id)
         if not still:
             async with connect(DB_PATH) as db:
@@ -623,6 +633,21 @@ class ConnectionManager:
 
     def is_online(self, user_id: int) -> bool:
         return bool(self.active.get(user_id))
+
+    def is_app_active(self, user_id: int) -> bool:
+        """True if user has at least one tab/window of Калаграм in the foreground."""
+        return bool(self.foreground.get(user_id))
+
+    async def set_app_active(self, user_id: int, ws: WebSocket, active: bool) -> None:
+        async with self.lock:
+            if active:
+                if ws in self.active.get(user_id, set()):
+                    self.foreground.setdefault(user_id, set()).add(ws)
+            else:
+                if user_id in self.foreground:
+                    self.foreground[user_id].discard(ws)
+                    if not self.foreground[user_id]:
+                        del self.foreground[user_id]
 
     async def send_to(self, user_id: int, data: dict[str, Any]) -> None:
         sockets = list(self.active.get(user_id, set()))
@@ -1774,6 +1799,10 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
                     )
             elif obj.get("type") == "ping":
                 await ws.send_json({"type": "pong"})
+            elif obj.get("type") == "app_active":
+                # Client reports document visibility — skip push while true
+                active = bool(obj.get("active", False))
+                await manager.set_app_active(user_id, ws, active)
     except WebSocketDisconnect:
         pass
     finally:

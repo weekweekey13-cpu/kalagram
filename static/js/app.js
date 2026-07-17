@@ -120,6 +120,176 @@
     toast._t = setTimeout(() => el.classList.add("hidden"), ms);
   }
 
+  // In-app top banner for messages from other chats (swipe up to dismiss)
+  const inappBanner = {
+    peerId: null,
+    isGroup: false,
+    touchY0: null,
+    dragY: 0,
+    leaving: false,
+  };
+
+  function dismissInAppBanner(animated = true) {
+    const el = $("#inapp-banner");
+    if (!el || el.classList.contains("hidden")) return;
+    clearTimeout(dismissInAppBanner._t);
+    if (!animated) {
+      el.classList.add("hidden");
+      el.classList.remove("inapp-banner--enter", "inapp-banner--leave");
+      el.style.transform = "";
+      inappBanner.leaving = false;
+      inappBanner.peerId = null;
+      return;
+    }
+    if (inappBanner.leaving) return;
+    inappBanner.leaving = true;
+    el.classList.remove("inapp-banner--enter");
+    el.classList.add("inapp-banner--leave");
+    el.style.transform = "";
+    setTimeout(() => {
+      el.classList.add("hidden");
+      el.classList.remove("inapp-banner--leave");
+      inappBanner.leaving = false;
+      inappBanner.peerId = null;
+    }, 280);
+  }
+
+  function showInAppBanner({ title, body, avatarUser, peerId, isGroup }) {
+    const el = $("#inapp-banner");
+    if (!el) return;
+    // only while app is visible
+    if (document.hidden || document.visibilityState !== "visible") return;
+
+    const titleEl = $("#inapp-banner-title");
+    const bodyEl = $("#inapp-banner-body");
+    const avEl = $("#inapp-banner-avatar");
+    if (titleEl) titleEl.textContent = title || "Новое сообщение";
+    if (bodyEl) bodyEl.textContent = body || "";
+    if (avEl) {
+      avEl.innerHTML = "";
+      setAvatar(avEl, avatarUser || { display_name: title, nick: title }, {
+        isGroup: !!isGroup,
+      });
+    }
+
+    inappBanner.peerId = peerId != null ? Number(peerId) : null;
+    inappBanner.isGroup = !!isGroup;
+    inappBanner.leaving = false;
+    inappBanner.dragY = 0;
+
+    el.classList.remove("hidden", "inapp-banner--leave");
+    el.style.transform = "";
+    // re-trigger enter animation
+    el.classList.remove("inapp-banner--enter");
+    void el.offsetWidth;
+    el.classList.add("inapp-banner--enter");
+
+    clearTimeout(dismissInAppBanner._t);
+    dismissInAppBanner._t = setTimeout(() => dismissInAppBanner(true), 4500);
+  }
+
+  function bindInAppBanner() {
+    const el = $("#inapp-banner");
+    if (!el || el._bound) return;
+    el._bound = true;
+
+    el.addEventListener("click", () => {
+      if (inappBanner.leaving) return;
+      const pid = inappBanner.peerId;
+      const isG = inappBanner.isGroup;
+      dismissInAppBanner(true);
+      if (pid == null) return;
+      if (isG) openGroupChat(pid);
+      else openChat(pid);
+    });
+
+    el.addEventListener(
+      "touchstart",
+      (e) => {
+        if (!e.touches?.[0]) return;
+        inappBanner.touchY0 = e.touches[0].clientY;
+        inappBanner.dragY = 0;
+        el.classList.remove("inapp-banner--enter");
+        clearTimeout(dismissInAppBanner._t);
+      },
+      { passive: true }
+    );
+
+    el.addEventListener(
+      "touchmove",
+      (e) => {
+        if (inappBanner.touchY0 == null || !e.touches?.[0]) return;
+        const dy = e.touches[0].clientY - inappBanner.touchY0;
+        // only drag upward
+        const up = Math.min(0, dy);
+        inappBanner.dragY = up;
+        const base =
+          window.matchMedia("(min-width: 1024px)").matches
+            ? "translateX(0)"
+            : "translateX(-50%)";
+        el.style.transform = `${base} translateY(${up}px)`;
+        el.style.opacity = String(Math.max(0.25, 1 + up / 90));
+      },
+      { passive: true }
+    );
+
+    el.addEventListener(
+      "touchend",
+      () => {
+        const up = inappBanner.dragY;
+        inappBanner.touchY0 = null;
+        el.style.opacity = "";
+        if (up < -36) {
+          dismissInAppBanner(true);
+        } else {
+          el.style.transform = "";
+          dismissInAppBanner._t = setTimeout(() => dismissInAppBanner(true), 3500);
+        }
+        inappBanner.dragY = 0;
+      },
+      { passive: true }
+    );
+
+    el.addEventListener(
+      "touchcancel",
+      () => {
+        inappBanner.touchY0 = null;
+        inappBanner.dragY = 0;
+        el.style.transform = "";
+        el.style.opacity = "";
+      },
+      { passive: true }
+    );
+  }
+
+  function reportAppActive(active) {
+    try {
+      if (state.ws?.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: "app_active", active: !!active }));
+      }
+    } catch (_) {}
+  }
+
+  function isAppVisible() {
+    return !document.hidden && document.visibilityState === "visible";
+  }
+
+  function setupAppPresence() {
+    const send = () => reportAppActive(isAppVisible());
+    document.addEventListener("visibilitychange", () => {
+      send();
+      if (!isAppVisible()) dismissInAppBanner(false);
+    });
+    window.addEventListener("pageshow", send);
+    window.addEventListener("pagehide", () => reportAppActive(false));
+    window.addEventListener("focus", () => reportAppActive(true));
+    window.addEventListener("blur", () => {
+      // on mobile blur is flaky; rely mainly on visibilitychange
+      if (document.hidden) reportAppActive(false);
+    });
+    send();
+  }
+
   function initials(name) {
     const s = (name || "?").trim();
     const parts = s.split(/\s+/).filter(Boolean);
@@ -1553,6 +1723,8 @@
 
     ws.onopen = () => {
       state.reconnectDelay = 1000;
+      // tell server whether we're looking at the app (skip push if yes)
+      reportAppActive(isAppVisible());
     };
 
     ws.onmessage = (ev) => {
@@ -1604,14 +1776,24 @@
         if (inOpenGroup && m.sender_id !== state.me.id) {
           api(`/api/groups/${state.peer.id}/messages`).catch(() => {});
         }
-      } else if (m.sender_id !== state.me.id) {
-        const name = data.sender?.display_name || "Новое сообщение";
+      } else if (m.sender_id !== state.me?.id) {
+        // Another chat while app is open → top banner (swipe up to close)
+        const name =
+          data.sender?.display_name || data.sender?.nick || "Новое сообщение";
         const preview =
-          m.msg_type === "voice" ? "🎤 Голосовое" : (m.text || "").slice(0, 60);
-        toast(`${name}: ${preview}`);
+          m.msg_type === "voice" ? "🎤 Голосовое" : (m.text || "").slice(0, 80);
+        if (isAppVisible()) {
+          showInAppBanner({
+            title: name,
+            body: preview,
+            avatarUser: data.sender,
+            peerId: m.group_id || m.sender_id,
+            isGroup: !!m.group_id,
+          });
+        }
       }
-      // Local notification if app not visible (fallback when remote push fails)
-      if (m.sender_id !== state.me?.id && (document.hidden || document.visibilityState !== "visible")) {
+      // System/local notification only when app is NOT visible (push may also fire)
+      if (m.sender_id !== state.me?.id && !isAppVisible()) {
         const name = data.sender?.display_name || data.sender?.nick || "Калаграм";
         const preview =
           m.msg_type === "voice" ? "🎤 Голосовое" : (m.text || "Новое сообщение").slice(0, 80);
@@ -2162,6 +2344,8 @@
   }
 
   bind();
+  bindInAppBanner();
+  setupAppPresence();
   bootstrap().then(() => {
     if (state.token) afterLoginPush();
   });

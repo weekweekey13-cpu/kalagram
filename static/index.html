@@ -20,7 +20,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png" />
   <title>Калаграм</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=10" />
+  <link rel="stylesheet" href="/static/css/style.css?v=11" />
 </head>
 <body>
   <div id="app">
@@ -275,6 +275,18 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status"></div>
-  <script src="/static/js/app.js?v=10"></script>
+
+  <!-- In-app top banner (other chat while you're in the app) — swipe up to dismiss -->
+  <div id="inapp-banner" class="inapp-banner hidden" role="status" aria-live="polite">
+    <div class="inapp-banner-inner">
+      <div class="inapp-banner-avatar" id="inapp-banner-avatar"></div>
+      <div class="inapp-banner-text">
+        <div class="inapp-banner-title" id="inapp-banner-title"></div>
+        <div class="inapp-banner-body" id="inapp-banner-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js?v=11"></script>
 </body>
 </html>
