@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.15";
+  const APP_VERSION = "1.16";
   const APP_UPDATE_NOTES =
-    "Обнова 1.15 готова ✓\n• Фикс кнопки микрофона на iPhone\n• 🎤 → говори → синяя ✓";
+    "Обнова 1.16 готова ✓\n• Микрофон: жёсткий фикс кнопки (onclick)\n• 🎤 → говори → ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -1109,9 +1109,22 @@
       state.peer = data.peer;
       state.messages = data.messages || [];
       $("#panel-chat")?.classList.remove("desktop-empty");
+      // ensure composer visible
+      const comp = document.querySelector(".composer");
+      if (comp) comp.classList.remove("hidden");
+      const main = $("#composer-main");
+      if (main) {
+        main.classList.remove("hidden");
+        main.classList.remove("has-text");
+      }
+      const ta = $("#msg-input");
+      if (ta) {
+        ta.value = "";
+        updateComposerMode();
+      }
       renderPeerHeader();
       renderMessages(true);
-      // refresh list in background without closing chat on desktop
+      bindMicHold(); // re-export globals / rewire
       loadChats().catch(() => {});
       if (isDesktopLayout()) {
         setTimeout(() => $("#msg-input")?.focus(), 30);
@@ -1135,8 +1148,21 @@
       state.peer = { ...data.group, is_group: true, display_name: data.group.name };
       state.messages = data.messages || [];
       $("#panel-chat")?.classList.remove("desktop-empty");
+      const comp = document.querySelector(".composer");
+      if (comp) comp.classList.remove("hidden");
+      const main = $("#composer-main");
+      if (main) {
+        main.classList.remove("hidden");
+        main.classList.remove("has-text");
+      }
+      const ta = $("#msg-input");
+      if (ta) {
+        ta.value = "";
+        updateComposerMode();
+      }
       renderPeerHeader();
       renderMessages(true);
+      bindMicHold();
       loadChats().catch(() => {});
       if (isDesktopLayout()) {
         setTimeout(() => $("#msg-input")?.focus(), 30);
@@ -2388,22 +2414,24 @@
   }
 
   function bindMicHold() {
-    // Simple, reliable: click only (+ ignore ghost double-fires)
-    // preventDefault on touchend was killing the mic button on iOS PWA.
-    if (bindMicHold._done) return;
-    bindMicHold._done = true;
+    // Global handlers used by HTML onclick (most reliable on iOS PWA)
     let lock = false;
     let lastAt = 0;
 
     const activateMic = async () => {
       const now = Date.now();
-      if (now - lastAt < 450) return; // debounce double tap/click
+      if (now - lastAt < 400) return;
       lastAt = now;
       if (lock) return;
       lock = true;
       try {
+        // Always visible feedback first
+        try {
+          toast("…", 400);
+        } catch (_) {}
+
         if (!state.peer || state.systemChat) {
-          toast("Откройте чат с человеком");
+          toast("Сначала откройте чат с человеком");
           return;
         }
         if (state.sendingVoice) {
@@ -2417,41 +2445,40 @@
         unlockAudioContext();
         await startRecording();
       } catch (err) {
-        console.error(err);
-        toast(err.message || "Ошибка записи");
+        console.error("mic tap", err);
+        toast((err && err.message) || "Ошибка записи");
         micBusy = false;
         state.recordingActive = false;
+        hideRecordUI();
       } finally {
         lock = false;
       }
     };
 
-    // Bind directly + delegation (belt and suspenders)
-    const wire = (el) => {
-      if (!el || el._micWired) return;
-      el._micWired = true;
-      el.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        activateMic();
-      });
+    window.kalagramMicTap = activateMic;
+    window.kalagramMicSend = async () => {
+      try {
+        await finishRecording(true);
+      } catch (e) {
+        toast((e && e.message) || "Ошибка отправки");
+      }
+    };
+    window.kalagramMicCancel = () => {
+      try {
+        stopRecording(true);
+        toast("Отменено");
+      } catch (_) {}
     };
 
-    wire($("#btn-mic"));
-    document.addEventListener(
-      "click",
-      (e) => {
-        const btn = e.target && e.target.closest && e.target.closest("#btn-mic");
-        if (!btn) return;
-        // if already wired on the element, its handler runs too — debounce handles it
-        if (!btn._micWired) {
-          e.preventDefault();
-          e.stopPropagation();
-          activateMic();
-        }
-      },
-      true
-    );
+    // Backup listeners (HTML onclick is primary on iOS)
+    const btn = document.getElementById("btn-mic");
+    if (btn && !btn._micWired) {
+      btn._micWired = true;
+      btn.addEventListener("click", (e) => {
+        // HTML onclick also fires — debounce inside activateMic
+        activateMic();
+      });
+    }
   }
 
   // ── Profile ──────────────────────────────
@@ -3106,10 +3133,33 @@
     } catch (_) {}
   }
 
-  bind();
-  bindInAppBanner();
-  setupAppPresence();
-  bootstrap().then(() => {
-    if (state.token) afterLoginPush();
-  });
+  // Expose stubs immediately so HTML onclick never fully fails during load
+  window.kalagramMicTap =
+    window.kalagramMicTap ||
+    function () {
+      alert("Калаграм загружается… подождите секунду и нажмите ещё раз");
+    };
+  window.kalagramMicSend = window.kalagramMicSend || function () {};
+  window.kalagramMicCancel = window.kalagramMicCancel || function () {};
+
+  try {
+    bind();
+    bindInAppBanner();
+    setupAppPresence();
+    // ensure mic globals after bind
+    bindMicHold();
+  } catch (e) {
+    console.error("bind failed", e);
+    try {
+      alert("Ошибка запуска: " + (e && e.message));
+    } catch (_) {}
+  }
+  bootstrap()
+    .then(() => {
+      if (state.token) afterLoginPush();
+      try {
+        bindMicHold();
+      } catch (_) {}
+    })
+    .catch((e) => console.error("bootstrap", e));
 })();

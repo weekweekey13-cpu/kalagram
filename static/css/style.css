@@ -949,9 +949,17 @@ img { display: block; max-width: 100%; }
   user-select: none;
   -webkit-touch-callout: none;
   position: relative;
-  z-index: 30;
+  z-index: 50;
   cursor: pointer;
-  pointer-events: auto;
+  pointer-events: auto !important;
+  min-width: 44px;
+  min-height: 44px;
+}
+.composer-inner .mic-btn {
+  display: grid !important; /* never stay invisible by accident */
+}
+.composer-inner.has-text .mic-btn {
+  display: none !important;
 }
 
 .mic-btn.recording {

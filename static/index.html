@@ -20,7 +20,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png" />
   <title>Калаграм</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=20" />
+  <link rel="stylesheet" href="/static/css/style.css?v=21" />
 </head>
 <body>
   <div id="app">
@@ -175,8 +175,9 @@
         <div id="messages" class="messages scroll"></div>
         <div class="composer safe-bottom">
           <div id="record-bar" class="record-bar hidden">
-            <button type="button" class="icon-btn rec-cancel" id="btn-rec-cancel" aria-label="Отмена">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            <button type="button" class="icon-btn rec-cancel" id="btn-rec-cancel" aria-label="Отмена"
+              onclick="if(window.kalagramMicCancel){window.kalagramMicCancel();}return false;">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events:none"><path d="M18 6L6 18M6 6l12 12"/></svg>
             </button>
             <div class="rec-wave">
               <span class="rec-dot"></span>
@@ -185,8 +186,9 @@
                 <span id="rec-hint" class="rec-hint">Говорите… нажмите ✓</span>
               </div>
             </div>
-            <button type="button" class="send-btn" id="btn-rec-send" aria-label="Отправить голосовое">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            <button type="button" class="send-btn" id="btn-rec-send" aria-label="Отправить голосовое"
+              onclick="if(window.kalagramMicSend){window.kalagramMicSend();}return false;">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
             </button>
           </div>
           <div class="composer-inner" id="composer-main">
@@ -194,8 +196,9 @@
             <button type="button" class="send-btn" id="btn-send" aria-label="Отправить" disabled>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
             </button>
-            <button type="button" class="mic-btn" id="btn-mic" aria-label="Голосовое сообщение" title="Нажмите, говорите, затем ✓">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><path d="M12 19v4M8 23h8"/></svg>
+            <button type="button" class="mic-btn" id="btn-mic" aria-label="Голосовое сообщение" title="Нажмите, говорите, затем ✓"
+              onclick="if(window.kalagramMicTap){window.kalagramMicTap();}else{alert('Калаграм ещё грузится — откройте чат через 2 сек');}return false;">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events:none"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><path d="M12 19v4M8 23h8"/></svg>
             </button>
           </div>
         </div>
@@ -290,6 +293,6 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js?v=20"></script>
+  <script src="/static/js/app.js?v=21"></script>
 </body>
 </html>
