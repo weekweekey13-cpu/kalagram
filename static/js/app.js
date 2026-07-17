@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.16";
+  const APP_VERSION = "1.17";
   const APP_UPDATE_NOTES =
-    "Обнова 1.16 готова ✓\n• Микрофон: жёсткий фикс кнопки (onclick)\n• 🎤 → говори → ✓";
+    "Обнова 1.17 готова ✓\n• Голосовые пересобраны: без зависаний микрофона\n• 🎤 → говори → ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -1780,16 +1780,33 @@
     ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
   }
 
-  // ── Voice recording ──────────────────────
-  // Tap 🎤 → record, tap ✓ → send.
-  // Formats: iPhone = m4a (only reliable). Android/PC = webm/opus (small, like ogg).
-  // Always also capture PCM→WAV as backup so «пустая запись» almost never happens.
-  // Mic stream kept alive → permission once.
+  // ══════════════════════════════════════════
+  // Voice recorder — clean state machine
+  // ══════════════════════════════════════════
+  // Root cause of "Подождите, открываю микрофон":
+  // await audioContext.resume() / getUserMedia hung and left micBusy=true forever.
+  // Fix: no unbounded awaits; phase-based state; force-reset on stuck; dual capture.
+  //
+  // UX: tap 🎤 start → tap ✓ send / ✕ cancel
+  // iOS: m4a MediaRecorder + PCM/WAV backup
+  // Android/PC: webm/opus (small) + PCM backup
+  // Mic stream kept alive after first grant (no re-prompt).
+
   const MIN_VOICE_SEC = 0.5;
   const MAX_VOICE_SEC = 120;
   const MIC_OK_KEY = "kalagram_mic_ok";
-  let micBusy = false;
-  let sharedAudioCtx = null;
+
+  const Voice = {
+    phase: "idle", // idle | starting | recording | stopping | sending
+    gen: 0, // increments to cancel stale async work
+    stream: null,
+    rec: null,
+    chunks: [],
+    pcm: null, // { chunks, nodes..., sampleRate }
+    audioCtx: null,
+    startedAt: 0,
+    timer: null,
+  };
 
   function isIOSDevice() {
     return (
@@ -1798,106 +1815,98 @@
     );
   }
 
+  function voiceSleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  function withTimeout(promise, ms, msg) {
+    let t;
+    return Promise.race([
+      promise.finally(() => clearTimeout(t)),
+      new Promise((_, rej) => {
+        t = setTimeout(() => rej(new Error(msg || "timeout")), ms);
+      }),
+    ]);
+  }
+
   function micBlockReason() {
     const isLocal =
       location.hostname === "localhost" ||
       location.hostname === "127.0.0.1" ||
       location.hostname === "[::1]";
     if (!window.isSecureContext && !isLocal) {
-      return "Микрофон только по HTTPS / с иконки Домой";
+      return "Микрофон только по HTTPS / с иконки «Домой»";
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return "Нет микрофона. Откройте Калаграм с Домой";
+      return "Нет API микрофона. Откройте Калаграм с Домой";
     }
     return null;
   }
 
-  function micStreamIsLive() {
-    const s = state.micStream;
-    if (!s) return false;
-    return s.getAudioTracks().some((t) => t.readyState === "live");
+  function streamIsLive(stream) {
+    return !!(
+      stream &&
+      stream.getAudioTracks &&
+      stream.getAudioTracks().some((t) => t.readyState === "live")
+    );
   }
 
-  function markMicGranted() {
-    try {
-      localStorage.setItem(MIC_OK_KEY, "1");
-    } catch {}
-  }
-
-  function unlockAudioContext() {
+  function voiceUnlockCtx() {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return null;
-    if (!sharedAudioCtx || sharedAudioCtx.state === "closed") {
+    if (!Voice.audioCtx || Voice.audioCtx.state === "closed") {
       try {
-        sharedAudioCtx = new AC();
+        Voice.audioCtx = new AC();
       } catch {
         return null;
       }
     }
-    if (sharedAudioCtx.state === "suspended") {
-      sharedAudioCtx.resume().catch(() => {});
+    // NEVER await resume without cap — iOS can hang forever
+    if (Voice.audioCtx.state === "suspended") {
+      try {
+        const p = Voice.audioCtx.resume();
+        if (p && typeof p.then === "function") {
+          p.catch(() => {});
+        }
+      } catch {}
     }
-    return sharedAudioCtx;
+    return Voice.audioCtx;
   }
 
-  /** Open mic once; never stop tracks until logout. */
-  async function ensureMicStream() {
-    if (micStreamIsLive()) {
-      markMicGranted();
-      state.micStream.getAudioTracks().forEach((t) => {
+  async function voiceGetStream() {
+    if (streamIsLive(Voice.stream)) {
+      Voice.stream.getAudioTracks().forEach((t) => {
         t.enabled = true;
-        try {
-          t.applyConstraints && t.applyConstraints({ echoCancellation: true });
-        } catch {}
       });
-      return state.micStream;
+      state.micStream = Voice.stream;
+      return Voice.stream;
     }
-    if (state.micStream) {
+    if (Voice.stream) {
       try {
-        state.micStream.getTracks().forEach((t) => t.stop());
+        Voice.stream.getTracks().forEach((t) => t.stop());
       } catch {}
-      state.micStream = null;
+      Voice.stream = null;
     }
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        channelCount: 1,
-      },
-    });
+    // Simplest constraints — most reliable on iOS PWA
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    Voice.stream = stream;
     state.micStream = stream;
-    markMicGranted();
+    try {
+      localStorage.setItem(MIC_OK_KEY, "1");
+    } catch {}
     stream.getAudioTracks().forEach((t) => {
       t.enabled = true;
       t.onended = () => {
+        if (Voice.stream === stream) Voice.stream = null;
         if (state.micStream === stream) state.micStream = null;
       };
     });
     return stream;
   }
 
-  function releaseMicStream() {
-    stopRecording(true);
-    if (state.micStream) {
-      try {
-        state.micStream.getTracks().forEach((t) => t.stop());
-      } catch {}
-      state.micStream = null;
-    }
-    if (sharedAudioCtx && sharedAudioCtx.state !== "closed") {
-      try {
-        sharedAudioCtx.close();
-      } catch {}
-      sharedAudioCtx = null;
-    }
-  }
-
   function pickRecorderMime() {
     if (typeof MediaRecorder === "undefined") return "";
-    const ios = isIOSDevice();
-    // iOS: only mp4/aac. Ogg/webm often empty or unplayable on iPhone.
-    // Android/PC: webm/opus is small (like ogg). Ogg if supported.
-    const types = ios
+    const list = isIOSDevice()
       ? ["audio/mp4", "audio/aac", "audio/mp4;codecs=mp4a.40.2"]
       : [
           "audio/webm;codecs=opus",
@@ -1906,7 +1915,7 @@
           "audio/ogg",
           "audio/mp4",
         ];
-    for (const t of types) {
+    for (const t of list) {
       try {
         if (MediaRecorder.isTypeSupported(t)) return t;
       } catch {}
@@ -1918,13 +1927,13 @@
     const n = samples.length;
     const buffer = new ArrayBuffer(44 + n * 2);
     const view = new DataView(buffer);
-    const writeStr = (off, s) => {
+    const ws = (off, s) => {
       for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
     };
-    writeStr(0, "RIFF");
+    ws(0, "RIFF");
     view.setUint32(4, 36 + n * 2, true);
-    writeStr(8, "WAVE");
-    writeStr(12, "fmt ");
+    ws(8, "WAVE");
+    ws(12, "fmt ");
     view.setUint32(16, 16, true);
     view.setUint16(20, 1, true);
     view.setUint16(22, 1, true);
@@ -1932,91 +1941,74 @@
     view.setUint32(28, sampleRate * 2, true);
     view.setUint16(32, 2, true);
     view.setUint16(34, 16, true);
-    writeStr(36, "data");
+    ws(36, "data");
     view.setUint32(40, n * 2, true);
-    let offset = 44;
+    let o = 44;
     for (let i = 0; i < n; i++) {
       const s = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      offset += 2;
+      view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      o += 2;
     }
     return new Blob([buffer], { type: "audio/wav" });
   }
 
-  function startPcmBackup(stream, ctx) {
+  function startPcm(stream, ctx) {
+    const source = ctx.createMediaStreamSource(stream);
+    // Keep graph alive on iOS (fully silent graphs may be skipped)
+    const osc = ctx.createOscillator();
+    const oscG = ctx.createGain();
+    oscG.gain.value = 0.00001;
+    osc.frequency.value = 20;
+    osc.connect(oscG);
+    oscG.connect(ctx.destination);
     try {
-      const source = ctx.createMediaStreamSource(stream);
-      // Keep audio graph "hot" — iOS may skip fully silent pipelines
-      const osc = ctx.createOscillator();
-      const oscGain = ctx.createGain();
-      oscGain.gain.value = 0.00001;
-      osc.frequency.value = 1;
-      osc.connect(oscGain);
-      oscGain.connect(ctx.destination);
-      try {
-        osc.start();
-      } catch {}
+      osc.start();
+    } catch {}
 
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
-      const outGain = ctx.createGain();
-      outGain.gain.value = 0.00001;
-      const chunks = [];
-      let peak = 0;
-      processor.onaudioprocess = (e) => {
-        if (!state.recordingActive) return;
-        const input = e.inputBuffer.getChannelData(0);
-        const copy = new Float32Array(input.length);
-        for (let i = 0; i < input.length; i++) {
-          const v = input[i];
-          copy[i] = v;
-          const a = v < 0 ? -v : v;
-          if (a > peak) peak = a;
-        }
-        chunks.push(copy);
-      };
-      source.connect(processor);
-      processor.connect(outGain);
-      outGain.connect(ctx.destination);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const g = ctx.createGain();
+    g.gain.value = 0.00001;
+    const chunks = [];
+    let capturing = true;
+    proc.onaudioprocess = (e) => {
+      if (!capturing) return;
+      const input = e.inputBuffer.getChannelData(0);
+      chunks.push(new Float32Array(input));
+    };
+    source.connect(proc);
+    proc.connect(g);
+    g.connect(ctx.destination);
 
-      state.wavFallback = {
-        ctx,
-        source,
-        processor,
-        outGain,
-        osc,
-        oscGain,
-        chunks,
-        getPeak: () => peak,
-      };
-      return true;
-    } catch (e) {
-      console.warn("PCM backup failed", e);
-      state.wavFallback = null;
-      return false;
-    }
+    Voice.pcm = {
+      capturing: () => capturing,
+      stopCapture: () => {
+        capturing = false;
+      },
+      chunks,
+      source,
+      proc,
+      g,
+      osc,
+      oscG,
+      sampleRate: ctx.sampleRate || 44100,
+    };
   }
 
-  function finishPcmBackup() {
-    const w = state.wavFallback;
-    if (!w) return null;
+  function finishPcm() {
+    const p = Voice.pcm;
+    Voice.pcm = null;
+    if (!p) return null;
+    p.stopCapture();
     try {
-      w.processor && w.processor.disconnect();
-      w.source && w.source.disconnect();
-      w.outGain && w.outGain.disconnect();
-      w.oscGain && w.oscGain.disconnect();
-      if (w.osc) {
-        try {
-          w.osc.stop();
-        } catch {}
-      }
+      p.proc.disconnect();
+      p.source.disconnect();
+      p.g.disconnect();
+      p.oscG.disconnect();
+      p.osc.stop();
     } catch {}
-    const chunks = w.chunks || [];
-    const rate = (w.ctx && w.ctx.sampleRate) || 44100;
-    const peak = w.getPeak ? w.getPeak() : 0;
-    state.wavFallback = null;
+    const chunks = p.chunks;
     if (!chunks.length) return null;
     const total = chunks.reduce((n, c) => n + c.length, 0);
-    // ~0.05s at 16k
     if (total < 800) return null;
     const samples = new Float32Array(total);
     let off = 0;
@@ -2024,11 +2016,8 @@
       samples.set(c, off);
       off += c.length;
     }
-    // if completely silent peak, still send (user might whisper) but log
-    if (peak < 0.0005) console.warn("voice pcm near-silent", peak);
-    const targetRate = 16000;
-    const down = downsampleMono(samples, rate, targetRate);
-    return encodeWavLocal(down, targetRate);
+    const down = downsampleMono(samples, p.sampleRate, 16000);
+    return encodeWavLocal(down, 16000);
   }
 
   function showRecordUI() {
@@ -2040,195 +2029,195 @@
     if (t) t.textContent = "0:00";
     const hint = $("#rec-hint");
     if (hint) hint.textContent = "Говорите… затем ✓";
-    clearInterval(state.recordTimer);
-    state.recordTimer = setInterval(() => {
-      const sec = (Date.now() - state.recordStart) / 1000;
+    clearInterval(Voice.timer);
+    Voice.timer = setInterval(() => {
+      const sec = (Date.now() - Voice.startedAt) / 1000;
       if (t) t.textContent = formatDuration(sec);
-      if (sec >= MAX_VOICE_SEC) finishRecording(true);
+      if (sec >= MAX_VOICE_SEC) voiceFinish(true);
     }, 200);
+    // mirror legacy flags for other code paths
+    state.recordingActive = true;
+    state.recordStart = Voice.startedAt;
   }
 
   function hideRecordUI() {
-    clearInterval(state.recordTimer);
-    state.recordTimer = null;
+    clearInterval(Voice.timer);
+    Voice.timer = null;
     const main = $("#composer-main");
     const bar = $("#record-bar");
     if (bar) bar.classList.add("hidden");
     if (main) main.classList.remove("hidden");
+    state.recordingActive = false;
   }
 
-  function makeRecorder(stream) {
-    const mime = pickRecorderMime();
-    const attempts = mime ? [mime, ""] : [""];
-    let lastErr = null;
-    for (const m of attempts) {
+  function voiceHardReset() {
+    Voice.gen++;
+    clearInterval(Voice.timer);
+    Voice.timer = null;
+    try {
+      if (Voice.rec && Voice.rec.state !== "inactive") Voice.rec.stop();
+    } catch {}
+    Voice.rec = null;
+    Voice.chunks = [];
+    if (Voice.pcm) {
       try {
-        return m
-          ? new MediaRecorder(stream, { mimeType: m })
-          : new MediaRecorder(stream);
-      } catch (e) {
-        lastErr = e;
+        finishPcm();
+      } catch {
+        Voice.pcm = null;
       }
     }
-    throw lastErr || new Error("MediaRecorder unavailable");
+    Voice.phase = "idle";
+    Voice.startedAt = 0;
+    state.recordingActive = false;
+    state.sendingVoice = false;
+    state.mediaRecorder = null;
+    state.recordChunks = [];
+    state.wavFallback = null;
+    hideRecordUI();
   }
 
-  async function ensureMicStreamWithTimeout(ms = 12000) {
-    let timer;
-    try {
-      return await Promise.race([
-        ensureMicStream(),
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error("Микрофон не отвечает. Разрешите доступ и нажмите ещё раз")),
-            ms
-          );
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
+  function releaseMicStream() {
+    voiceHardReset();
+    if (Voice.stream) {
+      try {
+        Voice.stream.getTracks().forEach((t) => t.stop());
+      } catch {}
+      Voice.stream = null;
+    }
+    state.micStream = null;
+    if (Voice.audioCtx && Voice.audioCtx.state !== "closed") {
+      try {
+        Voice.audioCtx.close();
+      } catch {}
+      Voice.audioCtx = null;
     }
   }
 
-  async function startRecording() {
+  async function voiceStart() {
     if (!state.peer || state.systemChat) {
-      toast("Откройте обычный чат");
+      toast("Сначала откройте чат с человеком");
       return false;
     }
-    if (state.recordingActive || state.sendingVoice) {
+    if (Voice.phase === "recording") {
+      // second tap on mic while recording → send
+      return voiceFinish(true);
+    }
+    if (Voice.phase === "sending" || Voice.phase === "stopping") {
+      toast("Секунду…");
       return false;
     }
-    if (micBusy) {
-      toast("Подождите, открываю микрофон…");
-      return false;
+    if (Voice.phase === "starting") {
+      // stuck? force free and retry
+      voiceHardReset();
     }
+
     const block = micBlockReason();
     if (block) {
       toast(block, 5000);
       return false;
     }
 
-    micBusy = true;
-    toast("Микрофон…", 1200);
-    // unlock audio in the user gesture chain
-    const ctx = unlockAudioContext();
+    const myGen = ++Voice.gen;
+    Voice.phase = "starting";
+    toast("Микрофон…", 1500);
+
+    // Sync unlock in gesture
+    const ctx = voiceUnlockCtx();
 
     try {
-      const stream = await ensureMicStreamWithTimeout(12000);
+      const stream = await withTimeout(
+        voiceGetStream(),
+        8000,
+        "Нет ответа микрофона. Настройки → Калаграм → Микрофон → Вкл"
+      );
+      if (myGen !== Voice.gen) return false;
+
+      // Soft resume, never hang
       if (ctx && ctx.state === "suspended") {
         try {
-          await ctx.resume();
+          await withTimeout(ctx.resume(), 400, "resume");
         } catch {}
       }
-      // let mic stabilize (iOS)
-      await new Promise((r) => setTimeout(r, 100));
+      await voiceSleep(60);
+      if (myGen !== Voice.gen) return false;
 
-      state.recordChunks = [];
-      state.recordBlob = null;
-      state.recordStart = Date.now();
-      state.recordStream = stream;
-      state.wavFallback = null;
-      state.mediaRecorder = null;
-      state.recordMode = null;
-      state.recordingActive = true;
+      Voice.chunks = [];
+      Voice.rec = null;
+      Voice.pcm = null;
+      Voice.startedAt = Date.now();
 
-      let mrOk = false;
-      let pcmOk = false;
+      let ok = false;
 
-      // 1) MediaRecorder (m4a on iOS, webm/opus on Android/PC)
+      // MediaRecorder
       if (typeof MediaRecorder !== "undefined") {
         try {
-          const rec = makeRecorder(stream);
+          const mime = pickRecorderMime();
+          const rec = mime
+            ? new MediaRecorder(stream, { mimeType: mime })
+            : new MediaRecorder(stream);
+          Voice.rec = rec;
           state.mediaRecorder = rec;
-          state.recordMode = "media";
           rec.ondataavailable = (e) => {
-            if (e.data && e.data.size > 0) state.recordChunks.push(e.data);
+            if (e.data && e.data.size > 0) Voice.chunks.push(e.data);
           };
-          rec.onerror = (ev) => console.warn("MR error", ev);
-          // iOS: timeslice often yields EMPTY chunks — start without it
-          if (isIOSDevice()) {
-            rec.start();
-          } else {
+          // iOS: no timeslice (empty chunks bug)
+          if (isIOSDevice()) rec.start();
+          else {
             try {
               rec.start(250);
             } catch {
               rec.start();
             }
           }
-          mrOk = true;
+          ok = true;
         } catch (e) {
-          console.warn("MediaRecorder start failed", e);
+          console.warn("MR fail", e);
+          Voice.rec = null;
           state.mediaRecorder = null;
         }
       }
 
-      // 2) PCM backup (when MR empty on iPhone)
+      // PCM backup
       if (ctx) {
         try {
-          pcmOk = !!startPcmBackup(stream, ctx);
+          startPcm(stream, ctx);
+          ok = true;
         } catch (e) {
-          console.warn("PCM backup error", e);
-          pcmOk = false;
+          console.warn("PCM fail", e);
         }
       }
 
-      if (!mrOk && !pcmOk) {
-        state.recordingActive = false;
-        toast("Запись не поддерживается на этом устройстве");
+      if (!ok) {
+        Voice.phase = "idle";
+        toast("Запись не поддерживается");
         return false;
       }
 
-      state.recordReady = true;
+      Voice.phase = "recording";
       showRecordUI();
       toast("Запись… нажмите синюю ✓", 2500);
       return true;
     } catch (err) {
+      if (myGen !== Voice.gen) return false;
       console.error(err);
-      state.recordingActive = false;
-      state.mediaRecorder = null;
-      state.wavFallback = null;
+      Voice.phase = "idle";
       hideRecordUI();
       const name = err && err.name;
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-        toast("Настройки → Калаграм → Микрофон → Вкл (один раз)", 6000);
+        toast("Разрешите микрофон: Настройки → Калаграм → Микрофон", 6000);
       } else if (name === "NotFoundError") {
         toast("Микрофон не найден");
       } else {
-        toast(err.message || name || "Ошибка микрофона", 4500);
+        toast((err && err.message) || "Ошибка микрофона", 4500);
       }
       return false;
-    } finally {
-      micBusy = false;
     }
   }
 
-  function stopRecording(discard) {
-    state.recordingActive = false;
-    const rec = state.mediaRecorder;
-    if (rec) {
-      try {
-        if (rec.state !== "inactive") rec.stop();
-      } catch {}
-    }
-    state.mediaRecorder = null;
-    state.recordChunks = [];
-    state.recordBlob = null;
-    if (state.wavFallback) {
-      try {
-        finishPcmBackup();
-      } catch {
-        state.wavFallback = null;
-      }
-    }
-    state.recordMode = null;
-    state.recordReady = false;
-    hideRecordUI();
-  }
-
-  async function stopAndGetBlob() {
-    const duration = Math.max(0, (Date.now() - state.recordStart) / 1000);
-    const rec = state.mediaRecorder;
-    const chunks = state.recordChunks;
+  async function voiceCollectBlob() {
+    const duration = Math.max(0, (Date.now() - Voice.startedAt) / 1000);
+    const rec = Voice.rec;
+    const chunks = Voice.chunks;
 
     if (rec && rec.state !== "inactive") {
       await new Promise((resolve) => {
@@ -2238,48 +2227,37 @@
           done = true;
           resolve();
         };
-        rec.addEventListener(
-          "dataavailable",
-          (e) => {
-            if (e.data && e.data.size > 0) chunks.push(e.data);
-          }
-        );
-        rec.addEventListener("stop", () => setTimeout(finish, 120), {
+        rec.addEventListener("dataavailable", (e) => {
+          if (e.data && e.data.size > 0) chunks.push(e.data);
+        });
+        rec.addEventListener("stop", () => setTimeout(finish, 100), {
           once: true,
         });
         try {
           try {
-            if (typeof rec.requestData === "function") rec.requestData();
+            rec.requestData && rec.requestData();
           } catch {}
           rec.stop();
         } catch {
           finish();
         }
-        setTimeout(finish, 3000);
+        setTimeout(finish, 2500);
       });
     }
 
-    // keep collecting PCM a bit after MR stop
-    await new Promise((r) => setTimeout(r, 80));
-    state.recordingActive = false;
+    await voiceSleep(50);
+    if (Voice.pcm) Voice.pcm.stopCapture();
 
-    const mrType =
-      (rec && rec.mimeType) || pickRecorderMime() || "audio/mp4";
-    let mrBlob = null;
-    if (chunks.length) {
-      mrBlob = new Blob(chunks, { type: mrType || "audio/mp4" });
-    }
-
+    const mrType = (rec && rec.mimeType) || pickRecorderMime() || "audio/mp4";
+    let mrBlob =
+      chunks.length > 0 ? new Blob(chunks, { type: mrType }) : null;
     let pcmBlob = null;
-    if (state.wavFallback) {
-      try {
-        pcmBlob = finishPcmBackup();
-      } catch {
-        state.wavFallback = null;
-      }
+    try {
+      pcmBlob = finishPcm();
+    } catch {
+      Voice.pcm = null;
     }
 
-    // Prefer compressed MR if it actually has data; else WAV backup
     let blob = null;
     let mime = "audio/wav";
     if (mrBlob && mrBlob.size >= 200) {
@@ -2288,57 +2266,41 @@
     } else if (pcmBlob && pcmBlob.size >= 200) {
       blob = pcmBlob;
       mime = "audio/wav";
-      console.warn("voice: using PCM/WAV backup", {
-        mrSize: mrBlob && mrBlob.size,
-        pcmSize: pcmBlob.size,
-      });
     } else {
       blob = mrBlob || pcmBlob;
-      mime = blob && blob.type ? blob.type : mime;
+      mime = (blob && blob.type) || mime;
     }
 
+    Voice.rec = null;
+    Voice.chunks = [];
     state.mediaRecorder = null;
     state.recordChunks = [];
-    state.recordBlob = null;
-    state.recordingActive = false;
-    state.recordMode = null;
-    state.recordReady = false;
     return { blob, duration, mime };
   }
 
   function voiceExtFromType(type) {
     const t = (type || "").toLowerCase();
     if (t.includes("wav")) return "wav";
-    if (t.includes("ogg") || t.includes("opus") && t.includes("ogg")) return "ogg";
+    if (t.includes("ogg")) return "ogg";
     if (t.includes("webm")) return "webm";
     if (t.includes("mpeg") || t.includes("mp3")) return "mp3";
     if (t.includes("mp4") || t.includes("m4a") || t.includes("aac")) return "m4a";
     return "m4a";
   }
 
-  async function sendVoiceBlob(blob, duration) {
+  async function voiceUpload(blob, duration) {
     if (!state.peer || !blob || state.systemChat) return;
-    if (blob.size < 80) {
-      toast("Слишком короткая запись");
-      return;
-    }
-
-    // Keep compressed formats as-is (webm/opus ≈ ogg size). No inflate to WAV.
-    const out = blob;
-    const type = (out.type || "").toLowerCase() || "audio/mp4";
+    const type = (blob.type || "").toLowerCase() || "audio/mp4";
     const ext = voiceExtFromType(type);
-
     const fd = new FormData();
-    fd.append("file", out, `voice.${ext}`);
+    fd.append("file", blob, `voice.${ext}`);
     fd.append(
       "duration",
       String(Math.max(MIN_VOICE_SEC, Math.round(duration * 10) / 10))
     );
-
     const url = state.isGroup
       ? `/api/groups/${state.peer.id}/voice`
       : `/api/messages/${state.peer.id}/voice`;
-
     const res = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${state.token}` },
@@ -2360,124 +2322,126 @@
     loadChats();
   }
 
-  async function finishRecording(forceSend) {
-    if (state.sendingVoice) return;
-    if (!state.recordingActive && !state.mediaRecorder && !state.wavFallback) {
+  async function voiceFinish(forceSend) {
+    if (Voice.phase === "sending" || Voice.phase === "stopping") return;
+    if (Voice.phase !== "recording" && !Voice.rec && !Voice.pcm) {
       hideRecordUI();
+      Voice.phase = "idle";
       return;
     }
 
+    Voice.phase = "stopping";
     state.sendingVoice = true;
-    try {
-      // iOS needs a moment so final frames land
-      const elapsed = (Date.now() - state.recordStart) / 1000;
-      if (elapsed < MIN_VOICE_SEC) {
-        await new Promise((r) =>
-          setTimeout(r, Math.ceil((MIN_VOICE_SEC - elapsed) * 1000) + 50)
-        );
-      } else {
-        await new Promise((r) => setTimeout(r, 200));
-      }
+    const myGen = Voice.gen;
 
-      const { blob, duration } = await stopAndGetBlob();
+    try {
+      const elapsed = (Date.now() - Voice.startedAt) / 1000;
+      if (elapsed < MIN_VOICE_SEC) {
+        await voiceSleep(Math.ceil((MIN_VOICE_SEC - elapsed) * 1000) + 80);
+      } else {
+        await voiceSleep(180);
+      }
+      if (myGen !== Voice.gen) return;
+
+      const { blob, duration } = await voiceCollectBlob();
       hideRecordUI();
 
       if (duration < MIN_VOICE_SEC && !forceSend) {
         toast("Минимум 0.5 сек");
+        Voice.phase = "idle";
         return;
       }
       if (!blob || blob.size < 80) {
-        console.warn("empty voice", { duration, size: blob && blob.size });
-        toast(
-          "Не поймали звук. Проверьте микрофон в Настройках → Калаграм",
-          5000
-        );
+        toast("Нет звука. Проверьте: Настройки → Калаграм → Микрофон", 5000);
+        Voice.phase = "idle";
         return;
       }
+
+      Voice.phase = "sending";
       toast("Отправка…", 1200);
-      await sendVoiceBlob(blob, duration);
+      await voiceUpload(blob, duration);
+      Voice.phase = "idle";
     } catch (err) {
       console.error(err);
       hideRecordUI();
-      toast(err.message || "Не удалось отправить");
+      toast((err && err.message) || "Не удалось отправить");
+      Voice.phase = "idle";
     } finally {
       state.sendingVoice = false;
       state.recordingActive = false;
+      if (Voice.phase === "stopping" || Voice.phase === "sending") {
+        Voice.phase = "idle";
+      }
     }
   }
 
+  // Legacy names used across the app
+  function stopRecording(discard) {
+    if (discard) {
+      voiceHardReset();
+    } else {
+      voiceFinish(true);
+    }
+  }
+  async function startRecording() {
+    return voiceStart();
+  }
+  async function finishRecording(force) {
+    return voiceFinish(force !== false);
+  }
   async function finishHoldRecording(force) {
-    return finishRecording(force !== false);
+    return voiceFinish(force !== false);
   }
   async function sendVoiceRecording() {
-    return finishRecording(true);
+    return voiceFinish(true);
   }
+  // micBusy no longer used; keep name so old refs don't throw
+  let micBusy = false;
 
   function bindMicHold() {
-    // Global handlers used by HTML onclick (most reliable on iOS PWA)
-    let lock = false;
     let lastAt = 0;
 
     const activateMic = async () => {
       const now = Date.now();
-      if (now - lastAt < 400) return;
+      if (now - lastAt < 350) return;
       lastAt = now;
-      if (lock) return;
-      lock = true;
       try {
-        // Always visible feedback first
-        try {
-          toast("…", 400);
-        } catch (_) {}
-
         if (!state.peer || state.systemChat) {
           toast("Сначала откройте чат с человеком");
           return;
         }
-        if (state.sendingVoice) {
-          toast("Отправка…");
+        // If somehow stuck in starting > 0ms and user taps again — hard reset
+        if (Voice.phase === "starting") {
+          voiceHardReset();
+          toast("Сброс… жмите ещё раз");
           return;
         }
-        if (state.recordingActive || state.mediaRecorder || state.wavFallback) {
-          await finishRecording(true);
-          return;
-        }
-        unlockAudioContext();
-        await startRecording();
+        voiceUnlockCtx();
+        await voiceStart();
       } catch (err) {
-        console.error("mic tap", err);
+        console.error("mic", err);
+        voiceHardReset();
         toast((err && err.message) || "Ошибка записи");
-        micBusy = false;
-        state.recordingActive = false;
-        hideRecordUI();
-      } finally {
-        lock = false;
       }
     };
 
     window.kalagramMicTap = activateMic;
     window.kalagramMicSend = async () => {
       try {
-        await finishRecording(true);
+        await voiceFinish(true);
       } catch (e) {
         toast((e && e.message) || "Ошибка отправки");
       }
     };
     window.kalagramMicCancel = () => {
-      try {
-        stopRecording(true);
-        toast("Отменено");
-      } catch (_) {}
+      voiceHardReset();
+      toast("Отменено");
     };
 
-    // Backup listeners (HTML onclick is primary on iOS)
     const btn = document.getElementById("btn-mic");
     if (btn && !btn._micWired) {
       btn._micWired = true;
-      btn.addEventListener("click", (e) => {
-        // HTML onclick also fires — debounce inside activateMic
-        activateMic();
-      });
+      btn.addEventListener("click", () => activateMic());
     }
   }
 
