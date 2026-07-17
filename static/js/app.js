@@ -1683,12 +1683,44 @@
         toast("Сначала войдите");
         return;
       }
-      toast("Шлём тест с сервера…");
+      toast("Шлём тест с сервера… сверните Калаграм");
       const r = await api("/api/push/test", { method: "POST" });
-      toast("Тест отправлен (устройств: " + (r.subscriptions || 0) + ")", 3000);
+      toast(
+        "Сервер доставил: " +
+          (r.delivered || 0) +
+          " из " +
+          (r.subscriptions || 0) +
+          " — сверните приложение",
+        4000
+      );
     } catch (err) {
-      toast(err.message || "Тест не прошёл", 4000);
+      toast(err.message || "Тест не прошёл", 5000);
     }
+  }
+
+  function showLocalMessageNotification(title, body, data) {
+    try {
+      if (typeof Notification === "undefined") return;
+      if (Notification.permission !== "granted") return;
+      // only when app not visible
+      if (!document.hidden && document.visibilityState === "visible") return;
+      const opts = {
+        body: body || "",
+        icon: "/static/icons/icon-192.png",
+        tag: "kalagram-msg",
+        data: data || {},
+      };
+      if (navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.ready.then((reg) => {
+          reg.showNotification(title || "Калаграм", opts).catch(() => {});
+        });
+      } else {
+        // fallback
+        try {
+          new Notification(title || "Калаграм", opts);
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 
   async function afterLoginPush() {

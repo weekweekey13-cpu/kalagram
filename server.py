@@ -540,17 +540,18 @@ async def push_notify_users(
     title: str,
     body: str,
     data: dict[str, Any] | None = None,
-) -> None:
+) -> list[dict[str, Any]]:
+    """Send web-push to all devices of given users. Returns per-subscription results."""
+    results: list[dict[str, Any]] = []
     if not user_ids:
-        return
+        return results
     try:
         ensure_vapid_keys()
     except Exception as e:
         print("VAPID error", e)
-        return
+        return [{"result": f"vapid_error:{e}"}]
     async with connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        # fetch all subscriptions for recipients
         placeholders = ",".join("?" * len(user_ids))
         cur = await db.execute(
             f"SELECT endpoint, p256dh, auth, user_id FROM push_subscriptions WHERE user_id IN ({placeholders})",
@@ -565,7 +566,14 @@ async def push_notify_users(
         }
         result = await send_web_push(sub, title, body, data)
         print(
-            f"push user={r['user_id']} result={result} endpoint={str(r['endpoint'])[:40]}"
+            f"push user={r['user_id']} result={result} endpoint={str(r['endpoint'])[:50]}"
+        )
+        results.append(
+            {
+                "user_id": r["user_id"],
+                "result": result,
+                "endpoint": str(r["endpoint"])[:48],
+            }
         )
         if result == "gone":
             gone.append(r["endpoint"])
@@ -578,6 +586,7 @@ async def push_notify_users(
                     "DELETE FROM push_subscriptions WHERE endpoint = ?", (ep,)
                 )
             await db.commit()
+    return results
 
 
 # ── websocket hub ───────────────────────────────────────────────
@@ -814,7 +823,7 @@ async def push_test(user: dict = Depends(get_current_user)):
             detail="Подписка не найдена. Откройте Калаграм с «Домой» → Профиль → Включить уведомления.",
         )
     try:
-        await push_notify_users(
+        results = await push_notify_users(
             [user["id"]],
             "Калаграм",
             "Тест: уведомления работают ✓",
@@ -823,7 +832,14 @@ async def push_test(user: dict = Depends(get_current_user)):
     except Exception as e:
         print("push_test send error", e)
         raise HTTPException(status_code=500, detail=f"Не удалось отправить push: {e}")
-    return {"ok": True, "subscriptions": count}
+    oks = sum(1 for r in results if r.get("result") == "ok")
+    if oks == 0:
+        detail = "; ".join(f"{r.get('result')}" for r in results) or "нет результата"
+        raise HTTPException(
+            status_code=502,
+            detail=f"Сервер не смог доставить push ({detail}). Нажмите «Включить уведомления» ещё раз.",
+        )
+    return {"ok": True, "subscriptions": count, "delivered": oks, "results": results}
 
 
 # ── auth routes ─────────────────────────────────────────────────
