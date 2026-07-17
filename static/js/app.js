@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.22";
+  const APP_VERSION = "1.23";
   const APP_UPDATE_NOTES =
-    "Обнова 1.22 готова ✓\n• Фикс «микрофон не активен»\n• 🎤 → говори → ✓";
+    "Обнова 1.23 готова ✓\n• Голос iPhone: без пустых записей\n• 🎤 → 2 сек → ✓";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -1781,16 +1781,11 @@
   }
 
   // ══════════════════════════════════════════
-  // Voice recorder — clean state machine
+  // Voice recorder
   // ══════════════════════════════════════════
-  // Root cause of "Подождите, открываю микрофон":
-  // await audioContext.resume() / getUserMedia hung and left micBusy=true forever.
-  // Fix: no unbounded awaits; phase-based state; force-reset on stuck; dual capture.
-  //
-  // UX: tap 🎤 start → tap ✓ send / ✕ cancel
-  // iOS: m4a MediaRecorder + PCM/WAV backup
-  // Android/PC: webm/opus (small) + PCM backup
-  // Mic stream kept alive after first grant (no re-prompt).
+  // iOS PWA: MediaRecorder ONLY (m4a). Concurrent PCM on the same stream
+  // was producing empty files. Desktop: MR + PCM backup.
+  // UX: 🎤 start → ✓ send / ✕ cancel
 
   const MIN_VOICE_SEC = 0.5;
   const MAX_VOICE_SEC = 120;
@@ -1798,14 +1793,15 @@
 
   const Voice = {
     phase: "idle", // idle | starting | recording | stopping | sending
-    gen: 0, // increments to cancel stale async work
+    gen: 0,
     stream: null,
     rec: null,
     chunks: [],
-    pcm: null, // { chunks, nodes..., sampleRate }
+    pcm: null,
     audioCtx: null,
     startedAt: 0,
     timer: null,
+    mime: "",
   };
 
   function isIOSDevice() {
@@ -1976,11 +1972,9 @@
   }
 
   function startPcm(stream, ctx) {
-    // Same stream as mic (NO track.clone — on iPhone clone is often silent)
     const source = ctx.createMediaStreamSource(stream);
     const proc = ctx.createScriptProcessor(4096, 1, 1);
     const g = ctx.createGain();
-    // Must be > 0 or some iOS builds skip the graph entirely
     g.gain.value = 0.001;
     const chunks = [];
     let capturing = true;
@@ -1994,7 +1988,6 @@
     source.connect(proc);
     proc.connect(g);
     g.connect(ctx.destination);
-
     Voice.pcm = {
       stopCapture: () => {
         capturing = false;
@@ -2020,26 +2013,28 @@
     const chunks = p.chunks;
     if (!chunks.length) return null;
     const total = chunks.reduce((n, c) => n + c.length, 0);
-    if (total < 160) return null; // ~10ms @16k after downsample still ok as raw
+    if (total < 160) return null;
     const samples = new Float32Array(total);
     let off = 0;
     for (const c of chunks) {
       samples.set(c, off);
       off += c.length;
     }
-    const down = downsampleMono(samples, p.sampleRate, 16000);
-    return encodeWavLocal(down, 16000);
+    return encodeWavLocal(downsampleMono(samples, p.sampleRate, 16000), 16000);
   }
 
-  /** Reliably stop MediaRecorder and return a Blob (or null). */
+  /**
+   * Stop MediaRecorder the WebKit-friendly way:
+   * assign ondataavailable/onstop (not only addEventListener), then stop().
+   */
   function stopMediaRecorder(rec, priorChunks) {
     return new Promise((resolve) => {
+      const parts = priorChunks ? priorChunks.slice() : [];
       if (!rec) {
         resolve(null);
         return;
       }
-      const parts = priorChunks ? priorChunks.slice() : [];
-      const mime = rec.mimeType || pickRecorderMime() || "audio/mp4";
+      const mime = rec.mimeType || Voice.mime || pickRecorderMime() || "audio/mp4";
 
       if (rec.state === "inactive") {
         resolve(parts.length ? new Blob(parts, { type: mime }) : null);
@@ -2047,35 +2042,34 @@
       }
 
       let settled = false;
-      const done = () => {
+      const finish = () => {
         if (settled) return;
         settled = true;
-        resolve(parts.length ? new Blob(parts, { type: mime }) : null);
+        const blob = parts.length ? new Blob(parts, { type: mime }) : null;
+        resolve(blob);
       };
 
-      const onData = (e) => {
-        // iOS sometimes delivers the ONLY chunk here on stop — accept any size > 0
+      // Overwrite handlers — most reliable on iOS Safari / PWA
+      rec.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) parts.push(e.data);
       };
-
-      rec.addEventListener("dataavailable", onData);
-      rec.addEventListener(
-        "stop",
-        () => {
-          rec.removeEventListener("dataavailable", onData);
-          // give WebKit a tick to flush
-          setTimeout(done, 200);
-        },
-        { once: true }
-      );
+      rec.onstop = () => {
+        setTimeout(finish, 250);
+      };
+      rec.onerror = () => finish();
 
       try {
-        // requestData is flaky on iOS; stop() should flush final buffer
+        // Some iOS builds need requestData before stop
+        try {
+          if (rec.state === "recording" && typeof rec.requestData === "function") {
+            rec.requestData();
+          }
+        } catch {}
         rec.stop();
       } catch {
-        done();
+        finish();
       }
-      setTimeout(done, 3500);
+      setTimeout(finish, 4000);
     });
   }
 
@@ -2172,26 +2166,31 @@
 
     const myGen = ++Voice.gen;
     Voice.phase = "starting";
+    const ios = isIOSDevice();
 
-    // Fresh AudioContext each recording — avoids permanent "suspended" on iOS
-    try {
-      if (Voice.audioCtx && Voice.audioCtx.state !== "closed") {
-        Voice.audioCtx.close().catch(() => {});
-      }
-    } catch {}
-    Voice.audioCtx = null;
-    const ctx = voiceUnlockCtx();
+    // Desktop may use PCM backup; iOS uses MediaRecorder only (PCM on same
+    // stream was killing m4a output → «пустая запись»).
+    let ctx = null;
+    if (!ios) {
+      try {
+        if (Voice.audioCtx && Voice.audioCtx.state !== "closed") {
+          Voice.audioCtx.close().catch(() => {});
+        }
+      } catch {}
+      Voice.audioCtx = null;
+      ctx = voiceUnlockCtx();
+    }
 
     try {
+      // Always force a fresh stream on iOS — reused tracks often go silent
       let stream = await withTimeout(
-        voiceGetStream(false),
+        voiceGetStream(ios ? true : false),
         10000,
         "Нет ответа микрофона. Профиль → «Разрешить микрофон»"
       );
       if (myGen !== Voice.gen) return false;
 
       let track = stream.getAudioTracks && stream.getAudioTracks()[0];
-      // Dead/ended track after app background — force new getUserMedia
       if (!track || track.readyState !== "live") {
         stream = await withTimeout(
           voiceGetStream(true),
@@ -2206,64 +2205,59 @@
           track.enabled = true;
         } catch {}
       }
-      // Do NOT throw on muted/readyState quirks — iOS lies sometimes.
-      // MediaRecorder/PCM will fail loudly if stream is truly dead.
 
-      // Resume AFTER mic granted — required for PCM callbacks
       if (ctx) {
         try {
           if (ctx.state !== "running") {
             await withTimeout(
               Promise.resolve(ctx.resume()).catch(() => {}),
-              1000,
+              800,
               "resume"
             );
           }
         } catch {}
       }
-      await voiceSleep(100);
+      await voiceSleep(120);
       if (myGen !== Voice.gen) return false;
 
       Voice.chunks = [];
       Voice.rec = null;
       Voice.pcm = null;
+      Voice.mime = "";
       Voice.startedAt = Date.now();
 
       let ok = false;
 
-      // ── MediaRecorder (m4a on iPhone) — NO timeslice on iOS ──
-      // start(1000) was dropping short takes (no chunk until 1s)
+      // ── MediaRecorder ──
       if (typeof MediaRecorder !== "undefined") {
         try {
           const mime = pickRecorderMime();
+          Voice.mime = mime || "audio/mp4";
           let rec;
           try {
             rec = mime
-              ? new MediaRecorder(stream, {
-                  mimeType: mime,
-                  audioBitsPerSecond: 128000,
-                })
-              : new MediaRecorder(stream);
-          } catch {
-            rec = mime
               ? new MediaRecorder(stream, { mimeType: mime })
               : new MediaRecorder(stream);
+          } catch {
+            rec = new MediaRecorder(stream);
+            Voice.mime = rec.mimeType || "audio/mp4";
           }
           Voice.rec = rec;
           state.mediaRecorder = rec;
+          // Single handler — WebKit-friendly
           rec.ondataavailable = (e) => {
-            if (e.data && e.data.size > 0) Voice.chunks.push(e.data);
+            if (e.data && e.data.size > 0) {
+              Voice.chunks.push(e.data);
+            }
           };
           rec.onerror = (ev) => console.warn("MR error", ev);
-          // iOS: one blob on stop. Desktop: timeslice ok.
-          if (isIOSDevice()) {
+
+          // iOS: timeslice 250ms works better than none for some versions;
+          // stop() still flushes the rest.
+          try {
+            rec.start(250);
+          } catch {
             rec.start();
-          } else {
-            try {
-              rec.start(250);
-            } catch {
-              rec.start();
-            }
           }
           ok = true;
         } catch (e) {
@@ -2273,13 +2267,30 @@
         }
       }
 
-      // ── PCM/WAV backup (same stream, no clone) ──
-      if (ctx) {
+      // ── PCM only on non-iOS (backup) ──
+      if (!ios && ctx) {
         try {
           startPcm(stream, ctx);
           ok = true;
         } catch (e) {
           console.warn("PCM fail", e);
+        }
+      }
+
+      // ── iOS fallback: PCM if MediaRecorder missing ──
+      if (ios && !ok && ctx) {
+        try {
+          if (ctx.state !== "running") {
+            await withTimeout(
+              Promise.resolve(ctx.resume()).catch(() => {}),
+              800,
+              "resume"
+            );
+          }
+          startPcm(stream, ctx);
+          ok = true;
+        } catch (e) {
+          console.warn("iOS PCM fail", e);
         }
       }
 
@@ -2303,7 +2314,7 @@
       hideRecordUI();
       const name = err && err.name;
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-        toast("Разрешите микрофон: Настройки → Калаграм → Микрофон", 6000);
+        toast("Профиль → «Разрешить микрофон» → Разрешить", 6000);
       } else if (name === "NotFoundError") {
         toast("Микрофон не найден");
       } else {
@@ -2323,7 +2334,9 @@
     const rec = Voice.rec;
     const prior = Voice.chunks.slice();
 
-    // 1) Stop MediaRecorder and wait for final dataavailable
+    // Keep recording a bit so last timeslice is non-empty
+    await voiceSleep(300);
+
     let mrBlob = null;
     try {
       mrBlob = await stopMediaRecorder(rec, prior);
@@ -2331,10 +2344,9 @@
       console.warn("stopMR", e);
     }
 
-    // 2) Stop PCM a bit later so last buffers arrive
-    await voiceSleep(150);
+    await voiceSleep(80);
     if (Voice.pcm) Voice.pcm.stopCapture();
-    await voiceSleep(50);
+    await voiceSleep(40);
 
     let pcmBlob = null;
     try {
@@ -2344,15 +2356,15 @@
       Voice.pcm = null;
     }
 
-    // 3) Pick best non-empty payload
-    let blob = null;
-    let mime = "audio/wav";
     const mrSize = (mrBlob && mrBlob.size) || 0;
     const pcmSize = (pcmBlob && pcmBlob.size) || 0;
+    let blob = null;
+    let mime = Voice.mime || "audio/mp4";
 
-    if (mrSize >= 200 && mrSize >= pcmSize) {
+    // Prefer real audio: compressed if ≥200 bytes, else PCM
+    if (mrSize >= 200) {
       blob = mrBlob;
-      mime = (rec && rec.mimeType) || pickRecorderMime() || "audio/mp4";
+      mime = (rec && rec.mimeType) || Voice.mime || "audio/mp4";
     } else if (pcmSize >= 200) {
       blob = pcmBlob;
       mime = "audio/wav";
@@ -2364,7 +2376,13 @@
       mime = "audio/wav";
     }
 
-    console.log("voice collect", { duration, mrSize, pcmSize, prior: prior.length });
+    console.log("voice collect", {
+      duration,
+      mrSize,
+      pcmSize,
+      prior: prior.length,
+      mime,
+    });
 
     Voice.rec = null;
     Voice.chunks = [];
