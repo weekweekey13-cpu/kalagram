@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.31";
+  const APP_VERSION = "1.32";
   const APP_UPDATE_NOTES =
-    "Обнова 1.31 готова ✓\n• Шапка чата без «отскока» при клавиатуре\n• Профиль / уведомления / фото группы";
+    "Обнова 1.32 готова ✓\n• Клавиатура: строка ввода поднимается, шапка на месте\n• Профиль / уведомления";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -296,23 +296,25 @@
   }
 
   /**
-   * iOS keyboard without header "fly-up then bounce back":
-   * - Lock shell height (never shrink #app when keyboard opens)
-   * - Lift only the chat bottom via --kb-inset
-   * - Kill scrollIntoView + pin window scroll every frame while typing
+   * iOS keyboard (Telegram-style):
+   * Pin #app exactly to visualViewport every frame.
+   * → topbar stays at top of visible area (no fly-away)
+   * → composer stays at bottom of visible area (above keyboard)
+   * Do NOT fight offsetTop with delayed scrollTo (that caused bounce).
    */
   function setupKeyboardViewport() {
     if (setupKeyboardViewport._done) return;
     setupKeyboardViewport._done = true;
 
     const root = document.documentElement;
-    let lockedAppH = Math.max(
-      Math.round(window.innerHeight || 0),
-      Math.round(document.documentElement.clientHeight || 0)
-    );
-    let lockedSafeTop = 0;
-    let guardRaf = 0;
-    let guardUntil = 0;
+    const app = document.getElementById("app");
+    if (!app) return;
+
+    let raf = 0;
+    let tracking = false;
+    let trackRaf = 0;
+    let lastH = 0;
+    let lastTop = 0;
 
     function measureSafeTop() {
       try {
@@ -330,84 +332,114 @@
       }
     }
 
-    function pinScroll() {
-      try {
-        if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
-        if (document.body) {
-          if (document.body.scrollTop) document.body.scrollTop = 0;
-          if (document.body.scrollLeft) document.body.scrollLeft = 0;
-        }
-        if (root.scrollTop) root.scrollTop = 0;
-        if (root.scrollLeft) root.scrollLeft = 0;
-      } catch (_) {}
+    function isDesktop() {
+      return window.matchMedia("(min-width: 1024px)").matches;
     }
 
-    function lockShellHeight() {
-      const h = Math.max(
-        Math.round(window.innerHeight || 0),
-        Math.round(document.documentElement.clientHeight || 0),
-        lockedAppH || 0
-      );
-      // Only grow or set on orientation — never shrink for keyboard
-      if (h >= lockedAppH) lockedAppH = h;
-      if (lockedAppH > 0) {
-        root.style.setProperty("--app-height", lockedAppH + "px");
-      }
-    }
-
-    function keyboardInset() {
-      const vv = window.visualViewport;
-      if (!vv) return 0;
-      const layoutH = Math.round(window.innerHeight || lockedAppH || 0);
-      const visH = Math.round(vv.height || 0);
-      const off = Math.round(vv.offsetTop || 0);
-      // Space covered by keyboard (and any iOS chrome shift)
-      const inset = Math.max(0, layoutH - visH - off);
-      // Ignore tiny toolbars / jitter
-      return inset > 80 ? inset : 0;
+    function resetShell() {
+      app.style.position = "";
+      app.style.top = "";
+      app.style.left = "";
+      app.style.right = "";
+      app.style.bottom = "";
+      app.style.width = "";
+      app.style.height = "";
+      app.style.transform = "";
+      root.style.setProperty("--app-height", "100dvh");
+      root.style.setProperty("--kb-inset", "0px");
+      document.body.classList.remove("kb-open");
     }
 
     function applyViewport() {
-      lockShellHeight();
-      pinScroll();
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
 
-      const kb = keyboardInset();
-      root.style.setProperty("--kb-inset", kb + "px");
-      document.body.classList.toggle("kb-open", kb > 0);
-
-      if (kb > 0 && state.activePanel === "chat") {
-        const box = document.getElementById("messages");
-        if (box) {
-          const nearBottom =
-            box.scrollHeight - box.scrollTop - box.clientHeight < 160;
-          if (nearBottom) box.scrollTop = box.scrollHeight;
+        if (isDesktop()) {
+          resetShell();
+          return;
         }
-      }
+
+        const vv = window.visualViewport;
+        const layoutH = Math.round(window.innerHeight || 0);
+
+        let top = 0;
+        let height = layoutH;
+        if (vv) {
+          top = Math.max(0, Math.round(vv.offsetTop || 0));
+          height = Math.max(200, Math.round(vv.height || layoutH));
+        }
+
+        // Fill the visible viewport only (keyboard sits below this box)
+        app.style.position = "fixed";
+        app.style.left = "0";
+        app.style.right = "0";
+        app.style.width = "100%";
+        app.style.bottom = "auto";
+        app.style.transform = "none";
+        app.style.top = top + "px";
+        app.style.height = height + "px";
+
+        root.style.setProperty("--app-height", height + "px");
+        root.style.setProperty("--kb-inset", "0px");
+        root.style.setProperty("--vv-top", top + "px");
+
+        const kbOpen = layoutH > 0 && height < layoutH - 90;
+        document.body.classList.toggle("kb-open", kbOpen);
+
+        // Keep chat scrolled to end so last messages stay visible above composer
+        if (
+          kbOpen &&
+          state.activePanel === "chat" &&
+          (height !== lastH || top !== lastTop)
+        ) {
+          const box = document.getElementById("messages");
+          if (box) {
+            const near =
+              box.scrollHeight - box.scrollTop - box.clientHeight < 180;
+            if (near) box.scrollTop = box.scrollHeight;
+          }
+        }
+        lastH = height;
+        lastTop = top;
+      });
     }
 
-    function startScrollGuard(ms) {
-      guardUntil = performance.now() + (ms || 900);
-      if (guardRaf) return;
-      const tick = (now) => {
-        pinScroll();
-        // Counter iOS visualViewport scroll jump without resizing shell
-        try {
-          const vv = window.visualViewport;
-          if (vv && vv.offsetTop) {
-            // Keep fixed shell at top of layout; don't follow offset (that was the bounce)
-            pinScroll();
-          }
-        } catch (_) {}
-        if (now < guardUntil) {
-          guardRaf = requestAnimationFrame(tick);
+    /** While typing, re-sync every frame so iOS can't leave header off-screen */
+    function startTracking() {
+      tracking = true;
+      if (trackRaf) return;
+      const tick = () => {
+        applyViewport();
+        if (
+          tracking &&
+          document.activeElement &&
+          /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+        ) {
+          trackRaf = requestAnimationFrame(tick);
         } else {
-          guardRaf = 0;
+          tracking = false;
+          trackRaf = 0;
+          applyViewport();
         }
       };
-      guardRaf = requestAnimationFrame(tick);
+      trackRaf = requestAnimationFrame(tick);
     }
 
-    // Block browser scroll-into-view on chat inputs (main cause of header flying)
+    function stopTracking() {
+      tracking = false;
+      if (trackRaf) {
+        cancelAnimationFrame(trackRaf);
+        trackRaf = 0;
+      }
+      // After blur, keyboard animates closed — resync a few times
+      applyViewport();
+      setTimeout(applyViewport, 50);
+      setTimeout(applyViewport, 200);
+      setTimeout(applyViewport, 400);
+    }
+
+    // Prevent focus scroll-into-view from moving chat chrome
     try {
       const origSiv = Element.prototype.scrollIntoView;
       Element.prototype.scrollIntoView = function (...args) {
@@ -416,7 +448,8 @@
             this &&
             (this.id === "msg-input" ||
               this.closest?.("#panel-chat") ||
-              this.closest?.(".composer"))
+              this.closest?.(".composer") ||
+              this.closest?.("#view-main"))
           ) {
             return;
           }
@@ -425,68 +458,26 @@
       };
     } catch (_) {}
 
-    lockedSafeTop = measureSafeTop();
-    root.style.setProperty("--safe-top-lock", lockedSafeTop + "px");
-    lockShellHeight();
+    const st = measureSafeTop();
+    root.style.setProperty("--safe-top-lock", st + "px");
     applyViewport();
-
     setTimeout(() => {
-      lockedSafeTop = measureSafeTop();
-      root.style.setProperty("--safe-top-lock", lockedSafeTop + "px");
-      lockShellHeight();
+      root.style.setProperty("--safe-top-lock", measureSafeTop() + "px");
       applyViewport();
-    }, 250);
+    }, 200);
 
     if (window.visualViewport) {
-      window.visualViewport.addEventListener(
-        "resize",
-        () => {
-          applyViewport();
-          if (document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) {
-            startScrollGuard(700);
-          }
-        },
-        { passive: true }
-      );
-      window.visualViewport.addEventListener(
-        "scroll",
-        () => {
-          pinScroll();
-          startScrollGuard(400);
-        },
-        { passive: true }
-      );
+      window.visualViewport.addEventListener("resize", applyViewport, {
+        passive: true,
+      });
+      window.visualViewport.addEventListener("scroll", applyViewport, {
+        passive: true,
+      });
     }
-
-    window.addEventListener(
-      "scroll",
-      () => {
-        pinScroll();
-      },
-      { passive: true, capture: true }
-    );
-
-    window.addEventListener(
-      "resize",
-      () => {
-        // Soft keyboard sometimes fires resize — do NOT unlock shrink; only orientation grows
-        applyViewport();
-      },
-      { passive: true }
-    );
-
+    window.addEventListener("resize", applyViewport, { passive: true });
     window.addEventListener("orientationchange", () => {
-      setTimeout(() => {
-        lockedAppH = Math.max(
-          Math.round(window.innerHeight || 0),
-          Math.round(document.documentElement.clientHeight || 0)
-        );
-        lockedSafeTop = measureSafeTop();
-        root.style.setProperty("--safe-top-lock", lockedSafeTop + "px");
-        root.style.setProperty("--app-height", lockedAppH + "px");
-        root.style.setProperty("--kb-inset", "0px");
-        applyViewport();
-      }, 300);
+      setTimeout(applyViewport, 100);
+      setTimeout(applyViewport, 350);
     });
 
     const bindInput = (el) => {
@@ -495,30 +486,21 @@
       el.addEventListener(
         "touchstart",
         () => {
-          // Pre-arm before focus so first frame is already pinned
-          pinScroll();
-          startScrollGuard(1000);
+          applyViewport();
+          startTracking();
         },
         { passive: true }
       );
       el.addEventListener("focus", () => {
-        pinScroll();
         applyViewport();
-        startScrollGuard(1000);
+        startTracking();
       });
-      el.addEventListener("blur", () => {
-        setTimeout(() => {
-          pinScroll();
-          root.style.setProperty("--kb-inset", "0px");
-          document.body.classList.remove("kb-open");
-          applyViewport();
-        }, 80);
-      });
+      el.addEventListener("blur", () => stopTracking());
     };
 
     bindInput(document.getElementById("msg-input"));
-    ["people-search", "chats-filter", "contacts-filter", "profile-name-input"].forEach((id) =>
-      bindInput(document.getElementById(id))
+    ["people-search", "chats-filter", "contacts-filter", "profile-name-input"].forEach(
+      (id) => bindInput(document.getElementById(id))
     );
 
     document.addEventListener(
@@ -527,9 +509,24 @@
         const t = e.target;
         if (!t || !/^(INPUT|TEXTAREA)$/.test(t.tagName)) return;
         bindInput(t);
-        pinScroll();
-        startScrollGuard(1000);
         applyViewport();
+        startTracking();
+      },
+      true
+    );
+    document.addEventListener(
+      "focusout",
+      (e) => {
+        const t = e.target;
+        if (!t || !/^(INPUT|TEXTAREA)$/.test(t.tagName)) return;
+        setTimeout(() => {
+          if (
+            !document.activeElement ||
+            !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+          ) {
+            stopTracking();
+          }
+        }, 0);
       },
       true
     );
@@ -3824,7 +3821,7 @@
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
-        .register("/sw.js?v=9", { scope: "/" })
+        .register("/sw.js?v=10", { scope: "/" })
         .catch((e) => console.warn("SW register", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
         const d = ev.data || {};
@@ -3895,7 +3892,7 @@
         if (!fromButton) return;
       }
       // ensure SW controlling page
-      let reg = await navigator.serviceWorker.register("/sw.js?v=9", { scope: "/" });
+      let reg = await navigator.serviceWorker.register("/sw.js?v=10", { scope: "/" });
       reg = await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         // wait a bit for controller

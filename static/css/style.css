@@ -44,8 +44,8 @@
 }
 
 html, body {
-  height: var(--app-height, 100dvh);
-  max-height: var(--app-height, 100dvh);
+  height: 100%;
+  width: 100%;
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
@@ -54,16 +54,13 @@ html, body {
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  /* Pin document so iOS keyboard doesn't scroll the whole UI */
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  width: 100%;
   overscroll-behavior: none;
   touch-action: manipulation;
-  /* No animated layout while keyboard opens */
   transition: none !important;
 }
 
@@ -80,14 +77,17 @@ img { display: block; max-width: 100%; }
 .hidden { display: none !important; }
 
 #app {
-  height: 100%;
-  height: var(--app-height, 100dvh);
-  max-height: var(--app-height, 100dvh);
-  position: relative;
-  overflow: hidden;
+  /* JS pins top/height to visualViewport on mobile (keyboard-safe) */
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
   width: 100%;
+  height: var(--app-height, 100dvh);
+  max-height: none;
+  overflow: hidden;
   transition: none !important;
-  /* shell height is locked — keyboard only adds --kb-inset inside chat */
+  box-sizing: border-box;
 }
 
 .view {
@@ -1041,12 +1041,17 @@ img { display: block; max-width: 100%; }
   border-top: 1px solid var(--border);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  /* When keyboard open, app height already shrinks — keep composer at bottom of flex */
   position: relative;
   z-index: 5;
+  transition: none !important;
 }
 
-/* Chat panel: flex column; keyboard lifts bottom only via --kb-inset */
+/* Keyboard open: drop home-indicator padding so field sits tight above keyboard */
+body.kb-open #panel-chat .composer {
+  padding-bottom: 8px;
+}
+
+/* Chat panel fills #app; #app height = visualViewport → composer above keyboard */
 #panel-chat.panel-chat {
   display: flex;
   flex-direction: column;
@@ -1054,8 +1059,7 @@ img { display: block; max-width: 100%; }
   height: 100%;
   overflow: hidden;
   box-sizing: border-box;
-  /* Space for keyboard — topbar stays put, messages/composer shrink */
-  padding-bottom: var(--kb-inset, 0px);
+  padding-bottom: 0;
   transition: none !important;
 }
 #panel-chat .messages {
@@ -1063,16 +1067,15 @@ img { display: block; max-width: 100%; }
   min-height: 0;
   transition: none !important;
 }
-#panel-chat .composer {
-  transition: none !important;
-}
-/* While keyboard open: freeze topbar visually at top of chat */
-body.kb-open #chat-topbar-normal,
-body.kb-open #chat-topbar-select {
-  position: sticky;
+#panel-chat .chat-topbar,
+#panel-chat #chat-topbar-normal,
+#panel-chat #chat-topbar-select {
+  flex-shrink: 0;
+  position: relative;
   top: 0;
-  z-index: 12;
+  z-index: 6;
   transform: none !important;
+  transition: none !important;
 }
 
 .composer-inner {
