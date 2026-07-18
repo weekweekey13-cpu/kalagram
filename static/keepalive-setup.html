@@ -37,7 +37,21 @@
     <a class="btn sec" href="https://kalagram-z20h.onrender.com/api/ping" target="_blank" rel="noopener">Проверить сейчас</a>
   </div>
 
-  <h2>1. UptimeRobot — самый надёжный (рекомендуем)</h2>
+  <h2>0. Cloudflare Worker — «второй сайт» который не спит</h2>
+  <p>
+    Бесплатный Worker на Cloudflare <b>не засыпает</b> как Render.
+    Раз в 5 минут он пингует Калаграм. Код лежит в репозитории:
+    <code>scripts/cloudflare-ping-worker.js</code>
+  </p>
+  <ol>
+    <li><a href="https://dash.cloudflare.com" target="_blank" rel="noopener">dash.cloudflare.com</a> → регистрация</li>
+    <li><b>Workers &amp; Pages</b> → Create → Create Worker</li>
+    <li>Вставь код из <code>cloudflare-ping-worker.js</code> → Deploy</li>
+    <li>Triggers → Cron Triggers → <code>*/5 * * * *</code> (каждые 5 мин)</li>
+  </ol>
+  <a class="btn" href="https://dash.cloudflare.com" target="_blank" rel="noopener">Открыть Cloudflare</a>
+
+  <h2>1. UptimeRobot — самый простой (тоже отлично)</h2>
   <p>Бесплатно, пинг раз в <b>5 минут</b>, почти никогда не опаздывает.</p>
   <ol>
     <li>Открой <a href="https://uptimerobot.com/signUp" target="_blank" rel="noopener">uptimerobot.com</a> → регистрация</li>
