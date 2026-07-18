@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no, interactive-widget=overlays-content" />
   <meta name="theme-color" content="#0b0d12" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -12,7 +12,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="stylesheet" href="/static/css/style.css?v=34" />
+  <link rel="stylesheet" href="/static/css/style.css?v=35" />
   <!-- iPhone / iPad home screen icons -->
   <link rel="apple-touch-icon" href="/static/icons/icon-180.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/icon-180.png" />
@@ -352,7 +352,7 @@
     // Force iOS PWA off stale shell: when this HTML is first seen after an update,
     // drop service worker + Cache API once, then reload.
     (function () {
-      var SHELL = "1.30";
+      var SHELL = "1.31";
       try {
         var key = "kalagram_shell_v";
         var prev = localStorage.getItem(key);
@@ -382,6 +382,6 @@
       } catch (e) {}
     })();
   </script>
-  <script src="/static/js/app.js?v=34"></script>
+  <script src="/static/js/app.js?v=35"></script>
 </body>
 </html>
