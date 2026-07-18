@@ -9,7 +9,10 @@
   <meta name="apple-mobile-web-app-title" content="Калаграм" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="format-detection" content="telephone=no" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
   <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/static/css/style.css?v=33" />
   <!-- iPhone / iPad home screen icons -->
   <link rel="apple-touch-icon" href="/static/icons/icon-180.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/icon-180.png" />
@@ -20,7 +23,6 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png" />
   <title>Калаграм</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=32" />
 </head>
 <body>
   <div id="app">
@@ -149,15 +151,23 @@
           <button type="button" class="icon-btn" id="btn-back-chats" aria-label="Назад">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
-          <button type="button" class="chat-peer" id="btn-peer-info" aria-label="Профиль"
-            onclick="if(window.kalagramOpenPeerProfile){window.kalagramOpenPeerProfile(event);}return false;">
+          <button type="button" class="chat-peer" id="btn-peer-info" data-open-peer-profile="1" aria-label="Профиль"
+            onclick="return window.kalagramOpenPeerProfile ? (window.kalagramOpenPeerProfile(event),false) : false;">
             <div class="avatar avatar-sm" id="peer-avatar" style="pointer-events:none"></div>
             <div class="chat-peer-meta" style="pointer-events:none">
               <div class="name" id="peer-name">—</div>
               <div class="status" id="peer-status">офлайн</div>
             </div>
           </button>
-          <div class="topbar-actions"></div>
+          <div class="topbar-actions">
+            <button type="button" class="icon-btn" id="btn-peer-info-i" data-open-peer-profile="1"
+              aria-label="Информация" title="Профиль"
+              onclick="return window.kalagramOpenPeerProfile ? (window.kalagramOpenPeerProfile(event),false) : false;">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events:none">
+                <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
+              </svg>
+            </button>
+          </div>
         </header>
         <!-- Selection mode toolbar (long-press messages) -->
         <header class="topbar select-topbar hidden" id="chat-topbar-select">
@@ -338,6 +348,40 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js?v=32"></script>
+  <script>
+    // Force iOS PWA off stale shell: when this HTML is first seen after an update,
+    // drop service worker + Cache API once, then reload.
+    (function () {
+      var SHELL = "1.29";
+      try {
+        var key = "kalagram_shell_v";
+        var prev = localStorage.getItem(key);
+        if (prev === SHELL) return;
+        localStorage.setItem(key, SHELL);
+        if (!prev) return; // first install of this shell — already fresh
+        var done = sessionStorage.getItem("kalagram_shell_bust");
+        if (done === SHELL) return;
+        sessionStorage.setItem("kalagram_shell_bust", SHELL);
+        Promise.resolve()
+          .then(function () {
+            if (!("serviceWorker" in navigator)) return;
+            return navigator.serviceWorker.getRegistrations().then(function (regs) {
+              return Promise.all(regs.map(function (r) { return r.unregister(); }));
+            });
+          })
+          .then(function () {
+            if (!window.caches) return;
+            return caches.keys().then(function (keys) {
+              return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+            });
+          })
+          .then(function () {
+            location.replace("/?v=" + SHELL + "&t=" + Date.now());
+          })
+          .catch(function () {});
+      } catch (e) {}
+    })();
+  </script>
+  <script src="/static/js/app.js?v=33"></script>
 </body>
 </html>

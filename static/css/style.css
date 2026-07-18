@@ -265,8 +265,19 @@ img { display: block; max-width: 100%; }
 .panel-chat { z-index: 4; }
 /* Peer profile always above chat on phone (iOS stacking / PWA) */
 #panel-peer-profile.panel-overlay {
-  z-index: 30;
+  z-index: 50 !important;
   background: var(--bg);
+}
+#panel-peer-profile:not(.hidden) {
+  display: flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+#btn-peer-info-i {
+  flex-shrink: 0;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(108, 140, 255, 0.35);
 }
 
 .topbar {

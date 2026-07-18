@@ -843,10 +843,10 @@ app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 # Bump this on every user-facing release — client shows «SMS» from Калаграм
 # (only for nick JOPA on the client)
-APP_VERSION = "1.28"
+APP_VERSION = "1.29"
 APP_UPDATE_NOTES = (
-    "Обнова 1.28 готова ✓\n"
-    "• Профиль друга / группы из шапки — fix iPhone\n"
+    "Обнова 1.29 готова ✓\n"
+    "• Профиль с iPhone: кнопка «i» + сброс кэша PWA\n"
     "• Уведомления вкл/выкл на чат\n"
     "• Фото группы (создатель)"
 )
@@ -2160,9 +2160,16 @@ async def manifest():
     )
 
 
+_NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"}
+
+
 @app.get("/sw.js")
 async def service_worker():
-    return FileResponse(STATIC / "sw.js", media_type="application/javascript")
+    return FileResponse(
+        STATIC / "sw.js",
+        media_type="application/javascript",
+        headers={**_NO_STORE, "Service-Worker-Allowed": "/"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -2170,7 +2177,8 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse(STATIC / "index.html")
+    # iOS PWA must never keep a stale shell without peer-profile panel
+    return FileResponse(STATIC / "index.html", headers=dict(_NO_STORE))
 
 
 @app.get("/ca.cer")

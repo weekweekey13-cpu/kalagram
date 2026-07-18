@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.28";
+  const APP_VERSION = "1.29";
   const APP_UPDATE_NOTES =
-    "Обнова 1.28 готова ✓\n• Профиль из шапки чата на iPhone\n• Уведомления на чат вкл/выкл\n• Фото группы";
+    "Обнова 1.29 готова ✓\n• Профиль на iPhone: кнопка «i» + сброс кэша\n• Уведомления на чат\n• Фото группы";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -634,7 +634,8 @@
       $("#panel-group").classList.remove("hidden");
       openGroupCreate();
     } else if (name === "peer-profile") {
-      // Full-screen on phone: chat stays open underneath on desktop only
+      ensurePeerProfilePanel();
+      // Full-screen on phone: hide chat so nothing covers the panel (iOS)
       if (!isDesktopLayout()) {
         $("#panel-chats")?.classList.add("hidden");
         $("#panel-contacts")?.classList.add("hidden");
@@ -643,8 +644,12 @@
       const pp = $("#panel-peer-profile");
       if (pp) {
         pp.classList.remove("hidden");
+        pp.style.display = "flex";
+        pp.style.zIndex = "50";
         // force reflow so iOS paints the panel
         void pp.offsetHeight;
+      } else {
+        toast("Нет панели профиля — обновите приложение");
       }
     }
   }
@@ -752,15 +757,26 @@
     showUpdateBanner._t = setTimeout(() => el.classList.add("hidden"), 12000);
   }
 
-  async function checkAppUpdate() {
-    // Service «SMS» about updates — only for @JOPA
-    if (!canSeeUpdateSms()) {
-      // hide any leftover banner for other accounts
-      const el = $("#update-banner");
-      if (el) el.classList.add("hidden");
-      return { version: APP_VERSION, isNew: false };
-    }
+  async function forceAppReload() {
+    try {
+      if (navigator.serviceWorker) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+    } catch (_) {}
+    try {
+      if (window.caches) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch (_) {}
+    const u = new URL(location.href);
+    u.searchParams.set("_kv", APP_VERSION);
+    u.searchParams.set("_t", String(Date.now()));
+    location.replace(u.toString());
+  }
 
+  async function checkAppUpdate() {
     let version = APP_VERSION;
     let notes = APP_UPDATE_NOTES;
     try {
@@ -771,6 +787,35 @@
       if (h && h.update_notes) notes = String(h.update_notes);
     } catch {}
     state.appVersion = version;
+
+    // Phone stuck on old JS while server is newer → wipe SW cache and reload
+    if (version && version !== APP_VERSION) {
+      let reloads = 0;
+      try {
+        reloads = Number(sessionStorage.getItem("kalagram_reload_n") || "0");
+      } catch (_) {}
+      if (reloads < 2) {
+        try {
+          sessionStorage.setItem("kalagram_reload_n", String(reloads + 1));
+        } catch (_) {}
+        toast(`Обновление до ${version}…`, 2000);
+        await forceAppReload();
+        return { version, isNew: true };
+      }
+    } else {
+      try {
+        sessionStorage.removeItem("kalagram_reload_n");
+      } catch (_) {}
+    }
+
+    // «SMS» about updates — only for @JOPA
+    if (!canSeeUpdateSms()) {
+      const el = $("#update-banner");
+      if (el) el.classList.add("hidden");
+      if (state.me) renderChats();
+      return { version, isNew: false };
+    }
+
     let seen = null;
     try {
       seen = localStorage.getItem(VERSION_SEEN_KEY);
@@ -1251,9 +1296,53 @@
   };
 
   let _peerProfileOpening = false;
+  let _peerProfileLastTap = 0;
+
+  function ensurePeerProfilePanel() {
+    let pp = document.getElementById("panel-peer-profile");
+    if (pp) return pp;
+    const main = document.getElementById("view-main");
+    if (!main) return null;
+    pp = document.createElement("div");
+    pp.id = "panel-peer-profile";
+    pp.className = "panel panel-overlay hidden";
+    pp.innerHTML = `
+      <header class="topbar">
+        <button type="button" class="icon-btn" id="btn-close-peer-profile" aria-label="Назад">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <div class="topbar-title"><h1 id="peer-profile-title">Профиль</h1></div>
+      </header>
+      <div class="profile scroll peer-profile-body">
+        <div class="profile-hero">
+          <button type="button" class="avatar avatar-xl profile-avatar" id="peer-profile-avatar" aria-label="Открыть фото"></button>
+          <input type="file" id="group-avatar-input" accept="image/*" hidden />
+          <p class="profile-hint hidden" id="peer-profile-avatar-hint">Нажмите, чтобы сменить фото группы</p>
+          <h2 id="peer-profile-name"></h2>
+          <p class="profile-nick" id="peer-profile-sub"></p>
+        </div>
+        <div class="peer-profile-actions">
+          <button type="button" class="btn btn-primary btn-block" id="btn-peer-open-chat">💬 Чат</button>
+          <button type="button" class="btn btn-ghost btn-block" id="btn-peer-notify" aria-pressed="true">🔔 Уведомления: вкл</button>
+        </div>
+        <div id="peer-profile-members-wrap" class="peer-members-wrap hidden">
+          <p class="group-pick-label">Участники</p>
+          <div id="peer-profile-members" class="list"></div>
+        </div>
+      </div>`;
+    main.appendChild(pp);
+    // wire close buttons on dynamically created panel
+    pp.querySelector("#btn-close-peer-profile")?.addEventListener("click", () => showPanel("chat"));
+    pp.querySelector("#btn-peer-open-chat")?.addEventListener("click", () => showPanel("chat"));
+    pp.querySelector("#btn-peer-notify")?.addEventListener("click", () => togglePeerNotifications());
+    return pp;
+  }
 
   async function openPeerProfileFromChat() {
-    if (_peerProfileOpening) return;
+    const now = Date.now();
+    if (now - _peerProfileLastTap < 400) return;
+    _peerProfileLastTap = now;
+
     if (!state.peer) {
       toast("Сначала откройте чат");
       return;
@@ -1268,6 +1357,24 @@
       toast("Нет данных собеседника");
       return;
     }
+
+    // 1) Open immediately from local chat data (works offline / if API slow)
+    ensurePeerProfilePanel();
+    peerProfile.isGroup = isG;
+    peerProfile.data = {
+      ...(peerProfile.data || {}),
+      ...state.peer,
+      id,
+      name: state.peer.name || state.peer.display_name,
+      display_name: state.peer.display_name || state.peer.name,
+      members: isG ? peerProfile.data?.members || state.peer.members || [] : undefined,
+      muted: peerProfile.muted,
+    };
+    renderPeerProfilePanel();
+    showPanel("peer-profile");
+
+    // 2) Refresh details from server
+    if (_peerProfileOpening) return;
     _peerProfileOpening = true;
     try {
       if (isG) {
@@ -1275,7 +1382,6 @@
         peerProfile.data = info;
         peerProfile.isGroup = true;
         peerProfile.muted = !!info.muted;
-        // keep peer avatar/name in sync
         state.peer = {
           ...state.peer,
           ...info,
@@ -1290,25 +1396,29 @@
         state.peer = { ...state.peer, ...info, is_group: false };
       }
       renderPeerProfilePanel();
-      showPanel("peer-profile");
     } catch (err) {
-      toast(err.message || "Не удалось открыть профиль");
+      // Panel already open with local data — only toast if useful
+      if (err && err.message) toast(err.message, 2200);
     } finally {
       _peerProfileOpening = false;
     }
   }
 
-  // Global for HTML onclick (iOS PWA is more reliable than only addEventListener)
+  // Global for HTML onclick (iOS PWA)
   window.kalagramOpenPeerProfile = function (e) {
     try {
       if (e) {
-        e.preventDefault?.();
-        e.stopPropagation?.();
+        try {
+          e.preventDefault();
+        } catch (_) {}
+        try {
+          e.stopPropagation();
+        } catch (_) {}
       }
       openPeerProfileFromChat();
     } catch (err) {
       try {
-        toast((err && err.message) || "Ошибка профиля");
+        alert("Профиль: " + ((err && err.message) || "ошибка"));
       } catch (_) {}
     }
     return false;
@@ -3202,49 +3312,47 @@
       loadChats();
     });
 
-    // Open friend / group profile from chat header (iOS: click + touchend)
-    const peerInfoBtn = $("#btn-peer-info");
-    if (peerInfoBtn && !peerInfoBtn._peerBound) {
-      peerInfoBtn._peerBound = true;
-      const fireOpen = (e) => {
-        if (e) {
+    // Open friend / group profile — capture-phase so iOS never misses the tap
+    if (!document._peerProfileDelegated) {
+      document._peerProfileDelegated = true;
+      const isPeerProfileTrigger = (el) =>
+        !!(el && el.closest && el.closest("[data-open-peer-profile], #btn-peer-info, #btn-peer-info-i"));
+
+      document.addEventListener(
+        "click",
+        (e) => {
+          if (!isPeerProfileTrigger(e.target)) return;
           e.preventDefault();
           e.stopPropagation();
-        }
-        openPeerProfileFromChat();
-      };
-      peerInfoBtn.addEventListener("click", fireOpen);
-      // iOS sometimes drops click on complex header buttons — catch touchend
-      let touchY0 = null;
-      let touchX0 = null;
-      peerInfoBtn.addEventListener(
-        "touchstart",
-        (e) => {
-          const t = e.changedTouches?.[0] || e.touches?.[0];
-          if (!t) return;
-          touchX0 = t.clientX;
-          touchY0 = t.clientY;
+          openPeerProfileFromChat();
         },
-        { passive: true }
+        true
       );
-      peerInfoBtn.addEventListener(
-        "touchend",
+
+      // pointerup covers finger + mouse; capture phase beats other handlers
+      document.addEventListener(
+        "pointerup",
         (e) => {
-          const t = e.changedTouches?.[0];
-          if (!t || touchX0 == null) return;
-          const moved =
-            Math.abs(t.clientX - touchX0) > 18 || Math.abs(t.clientY - touchY0) > 18;
-          touchX0 = null;
-          touchY0 = null;
-          if (moved) return;
-          // prevent ghost click double-open
-          e.preventDefault();
-          fireOpen(e);
+          if (e.pointerType === "mouse" && e.button !== 0) return;
+          if (!isPeerProfileTrigger(e.target)) return;
+          // Let click handler also run on desktop; on touch, open here and skip double via debounce
+          if (e.pointerType === "touch" || e.pointerType === "pen") {
+            e.preventDefault();
+            e.stopPropagation();
+            openPeerProfileFromChat();
+          }
         },
-        { passive: false }
+        true
       );
     }
-    const closePeer = () => showPanel("chat");
+    const closePeer = () => {
+      const pp = $("#panel-peer-profile");
+      if (pp) {
+        pp.style.display = "";
+        pp.style.zIndex = "";
+      }
+      showPanel("chat");
+    };
     $("#btn-close-peer-profile")?.addEventListener("click", closePeer);
     $("#btn-peer-open-chat")?.addEventListener("click", closePeer);
     $("#btn-peer-notify")?.addEventListener("click", () => {
@@ -3255,7 +3363,6 @@
       if (!d) return;
       const isG = peerProfile.isGroup;
       const isOwner = isG && (d.is_owner || d.owner_id === state.me?.id);
-      // Owner tap on group avatar without photo → pick file; with photo → lightbox
       if (isOwner && !d.avatar) {
         $("#group-avatar-input")?.click();
         return;
@@ -3268,7 +3375,10 @@
     };
     $("#peer-profile-avatar")?.addEventListener("click", onPeerAvatar);
     $("#peer-profile-avatar-hint")?.addEventListener("click", () => {
-      if (peerProfile.isGroup && (peerProfile.data?.is_owner || peerProfile.data?.owner_id === state.me?.id)) {
+      if (
+        peerProfile.isGroup &&
+        (peerProfile.data?.is_owner || peerProfile.data?.owner_id === state.me?.id)
+      ) {
         $("#group-avatar-input")?.click();
       }
     });
@@ -3474,7 +3584,7 @@
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
-        .register("/sw.js?v=6", { scope: "/" })
+        .register("/sw.js?v=7", { scope: "/" })
         .catch((e) => console.warn("SW register", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
         const d = ev.data || {};
@@ -3545,7 +3655,7 @@
         if (!fromButton) return;
       }
       // ensure SW controlling page
-      let reg = await navigator.serviceWorker.register("/sw.js?v=6", { scope: "/" });
+      let reg = await navigator.serviceWorker.register("/sw.js?v=7", { scope: "/" });
       reg = await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         // wait a bit for controller
@@ -3696,12 +3806,13 @@
     };
   window.kalagramMicSend = window.kalagramMicSend || function () {};
   window.kalagramMicCancel = window.kalagramMicCancel || function () {};
-  window.kalagramOpenPeerProfile =
-    window.kalagramOpenPeerProfile ||
-    function () {
+  // Do NOT overwrite real openPeerProfile if already assigned earlier in this file
+  if (typeof window.kalagramOpenPeerProfile !== "function") {
+    window.kalagramOpenPeerProfile = function () {
       alert("Калаграм загружается… откройте чат через секунду");
       return false;
     };
+  }
 
   try {
     bind();
