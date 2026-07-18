@@ -1,34 +1,25 @@
-# Keeps free Render dyno awake by pinging every 15 minutes.
-# Without this, the process sleeps and cold-starts take ~30–60s.
+# Copy of .github/workflows/keepalive.yml — for reference if workflow push is blocked.
+# Prefer setting UptimeRobot (see static/keepalive-setup.html or /keepalive-setup).
 name: Keep-alive
 
 on:
   schedule:
-    # every 15 minutes (UTC)
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - name: Wake Калаграм
         run: |
           set -e
-          URL="${KEEPALIVE_URL:-https://kalagram-z20h.onrender.com/api/keepalive}"
-          echo "Pinging $URL"
-          # up to 3 tries — cold start can be slow
-          for i in 1 2 3; do
-            if curl -fsS --max-time 90 "$URL"; then
-              echo
-              echo "OK (try $i)"
-              exit 0
-            fi
-            echo "try $i failed, retry…"
-            sleep 10
+          URL="https://kalagram-z20h.onrender.com/api/ping"
+          for i in 1 2 3 4 5; do
+            code=$(curl -sS -o /tmp/ka_body.txt -w "%{http_code}" --max-time 100 "$URL" || echo "000")
+            echo "try $i → HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 12
           done
-          echo "All tries failed"
           exit 1
-        env:
-          KEEPALIVE_URL: https://kalagram-z20h.onrender.com/api/keepalive

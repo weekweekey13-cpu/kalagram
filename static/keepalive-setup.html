@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Калаграм — не давать серверу спать</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #e8eaf0; background: #0b0d12; }
+    body { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; line-height: 1.45; }
+    h1 { font-size: 1.35rem; }
+    h2 { font-size: 1.05rem; margin-top: 1.6rem; color: #8aa4ff; }
+    a { color: #8aa4ff; }
+    .box { background: #151922; border: 1px solid #2a3145; border-radius: 12px; padding: 14px 16px; margin: 12px 0; }
+    code, .url { background: #1e2430; padding: 2px 8px; border-radius: 6px; word-break: break-all; font-size: 0.9rem; }
+    .url { display: block; padding: 10px 12px; margin: 8px 0; }
+    .btn { display: inline-block; margin: 6px 6px 6px 0; padding: 10px 14px; background: #5b7cfa; color: #fff !important;
+      text-decoration: none; border-radius: 10px; font-weight: 600; }
+    .btn.sec { background: #2a3145; }
+    .ok { color: #3dd68c; }
+    .warn { color: #ffb84d; }
+    ol { padding-left: 1.25rem; }
+    li { margin: 0.4rem 0; }
+  </style>
+</head>
+<body>
+  <h1>⚡ Калаграм не спит</h1>
+  <p>
+    Бесплатный Render <b>засыпает ~через 15 минут</b> без визитов.
+    Внутренний таймер в приложении <b>не помогает</b> — он тоже спит.
+    Нужен <b>внешний пинг каждые 5 минут</b> на URL ниже.
+  </p>
+
+  <div class="box">
+    <div>Пинг-URL (скопируй):</div>
+    <code class="url" id="ping-url">https://kalagram-z20h.onrender.com/api/ping</code>
+    <button class="btn" type="button" id="copy">Скопировать URL</button>
+    <a class="btn sec" href="https://kalagram-z20h.onrender.com/api/ping" target="_blank" rel="noopener">Проверить сейчас</a>
+  </div>
+
+  <h2>1. UptimeRobot — самый надёжный (рекомендуем)</h2>
+  <p>Бесплатно, пинг раз в <b>5 минут</b>, почти никогда не опаздывает.</p>
+  <ol>
+    <li>Открой <a href="https://uptimerobot.com/signUp" target="_blank" rel="noopener">uptimerobot.com</a> → регистрация</li>
+    <li><b>Add New Monitor</b></li>
+    <li>Monitor Type: <b>HTTP(s)</b></li>
+    <li>Friendly Name: <b>Kalagram</b></li>
+    <li>URL: вставь URL выше (<code>/api/ping</code>)</li>
+    <li>Monitoring Interval: <b>Every 5 minutes</b></li>
+    <li>Create Monitor</li>
+  </ol>
+  <a class="btn" href="https://uptimerobot.com/signUp" target="_blank" rel="noopener">Открыть UptimeRobot</a>
+
+  <h2>2. cron-job.org — запасной вариант</h2>
+  <ol>
+    <li><a href="https://cron-job.org/en/signup/" target="_blank" rel="noopener">Регистрация</a></li>
+    <li>Create cronjob → URL = пинг выше</li>
+    <li>Schedule: every <b>5 minutes</b></li>
+    <li>Enable → Create</li>
+  </ol>
+  <a class="btn sec" href="https://cron-job.org/en/signup/" target="_blank" rel="noopener">Открыть cron-job.org</a>
+
+  <h2>3. GitHub Actions (если репозиторий подключён)</h2>
+  <p>В репозитории есть workflow <code>Keep-alive</code> каждые 5 минут.
+    GitHub иногда <span class="warn">задерживает</span> cron на 5–15 мин — поэтому UptimeRobot важнее.</p>
+
+  <h2>Проверка</h2>
+  <p>После настройки открой Калаграм через <b>20–30 минут без визитов</b> —
+    должен открыться <span class="ok">сразу</span>, без минуты ожидания.</p>
+  <p><a href="/">← Назад в Калаграм</a></p>
+
+  <script>
+    const url = location.origin + "/api/ping";
+    document.getElementById("ping-url").textContent = url;
+    document.getElementById("copy").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        alert("Скопировано: " + url);
+      } catch {
+        prompt("Скопируй URL:", url);
+      }
+    };
+  </script>
+</body>
+</html>

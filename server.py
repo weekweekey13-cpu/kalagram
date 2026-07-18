@@ -893,12 +893,16 @@ manager = ConnectionManager()
 
 
 # ── keep-alive (anti-sleep on free hosting) ─────────────────────
-# Free Render sleeps after ~15 min idle. An in-process timer only runs while
-# the dyno is awake — real wake-ups need an external ping (GitHub Actions).
+# Free Render sleeps after ~15 min without EXTERNAL HTTP.
+# An in-process timer dies with the dyno — it cannot wake itself.
+# Real wake-ups: UptimeRobot / cron-job.org / GitHub Actions → /api/ping every 5 min.
 KEEPALIVE_NICK = os.environ.get("KEEPALIVE_NICK", "Dada").strip() or "Dada"
 KEEPALIVE_MINUTES = max(5, int(os.environ.get("KEEPALIVE_MINUTES", "15") or "15"))
 KEEPALIVE_BOT_NICK = "kalagram"
+# How often to message @Dada while process is already awake (not a wake source)
+KEEPALIVE_CHAT_MINUTES = max(10, int(os.environ.get("KEEPALIVE_CHAT_MINUTES", "30") or "30"))
 _keepalive_task: asyncio.Task | None = None
+_last_external_ping: float = 0.0
 
 
 async def ensure_keepalive_bot() -> dict[str, Any] | None:
@@ -947,15 +951,26 @@ async def send_keepalive_ping() -> dict[str, Any]:
 
 
 async def keepalive_loop() -> None:
-    interval = KEEPALIVE_MINUTES * 60
-    # first tick after a short delay (let app finish boot)
-    await asyncio.sleep(45)
+    """While dyno is UP: occasional in-app note to Dada. Does NOT prevent sleep."""
+    interval = KEEPALIVE_CHAT_MINUTES * 60
+    await asyncio.sleep(60)
     while True:
         try:
             await send_keepalive_ping()
         except Exception as e:
-            print("keepalive error:", e)
+            print("keepalive chat error:", e)
         await asyncio.sleep(interval)
+
+
+async def touch_db() -> bool:
+    """Cheap DB round-trip so Postgres/Neon stays warm too."""
+    try:
+        async with connect(DB_PATH) as db:
+            await db.execute("SELECT 1")
+        return True
+    except Exception as e:
+        print("touch_db:", e)
+        return False
 
 
 # ── app lifecycle ───────────────────────────────────────────────
@@ -972,9 +987,12 @@ async def lifespan(app: FastAPI):
             print("  Push: VAPID keys ready (file)")
         except Exception as e2:
             print("  Push: VAPID init failed", e, e2)
-    # anti-sleep: message Dada every 15 min while the process is up
+    # In-app chat tick while UP (cannot wake a sleeping free dyno by itself)
     _keepalive_task = asyncio.create_task(keepalive_loop())
-    print(f"  Keep-alive: every {KEEPALIVE_MINUTES}m → @{KEEPALIVE_NICK}")
+    print(
+        f"  Keep-alive chat: every {KEEPALIVE_CHAT_MINUTES}m → @{KEEPALIVE_NICK} "
+        f"(external /api/ping every 5m required to prevent sleep)"
+    )
     yield
     if _keepalive_task:
         _keepalive_task.cancel()
@@ -989,17 +1007,21 @@ app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 # Bump this on every user-facing release — client shows «SMS» from Калаграм
 # (only for nick JOPA on the client)
-APP_VERSION = "1.36"
+APP_VERSION = "1.37"
 APP_UPDATE_NOTES = (
-    "Обнова 1.36 готова ✓\n"
-    "• Ответ на сообщение: свайп вправо\n"
-    "• Голосовые / профиль / шапка"
+    "Обнова 1.37 готова ✓\n"
+    "• Keep-alive: /api/ping + инструкция UptimeRobot\n"
+    "• Ответ свайпом / голосовые"
 )
 
 
 @app.get("/api/health")
 async def health():
     """Public status: which DB backend is active (no secrets)."""
+    global _last_external_ping
+    age = None
+    if _last_external_ping:
+        age = int(time.time() - _last_external_ping)
     return {
         "ok": True,
         "app": "Калаграм",
@@ -1010,28 +1032,62 @@ async def health():
         "push": True,
         "keepalive_nick": KEEPALIVE_NICK,
         "keepalive_minutes": KEEPALIVE_MINUTES,
+        "last_external_ping_sec_ago": age,
+        "ping_url": "/api/ping",
+        "setup_url": "/keepalive-setup",
         "hint": (
-            "Данные на Neon — переживают перезапуск"
-            if USE_PG
-            else "SQLite на временном диске Render — после сна/деплоя данные могут пропасть. Добавьте DATABASE_URL (Neon)."
+            "Чтобы не ждать пробуждения: UptimeRobot → HTTP(s) → /api/ping каждые 5 мин. "
+            "Внутренний таймер сервер не будит."
+            if True
+            else ""
         ),
+    }
+
+
+@app.get("/api/ping")
+@app.head("/api/ping")
+async def ping_endpoint():
+    """
+    Lightweight external keep-alive. Point UptimeRobot / cron-job.org / GitHub Actions
+    here every 5 minutes. Does NOT spam chat — only wakes the dyno + touches DB.
+    """
+    global _last_external_ping
+    _last_external_ping = time.time()
+    db_ok = await touch_db()
+    return {
+        "ok": True,
+        "woke": True,
+        "ts": _last_external_ping,
+        "db": db_ok,
+        "version": APP_VERSION,
     }
 
 
 @app.get("/api/keepalive")
 async def keepalive_endpoint():
     """
-    External pingers (GitHub Actions / UptimeRobot) hit this every 15 min
-    to wake the free dyno AND send an in-app ping to @Dada.
-    No push notification — only chat message.
+    External pinger + optional in-app note to @Dada.
+    Prefer /api/ping for frequent (5 min) monitors — no chat spam.
     """
+    global _last_external_ping
+    _last_external_ping = time.time()
+    await touch_db()
     try:
         result = await send_keepalive_ping()
         return {"ok": True, "woke": True, **result}
     except Exception as e:
-        # Still return 200 so the pinger counts the dyno as up
         print("keepalive endpoint error:", e)
         return {"ok": False, "woke": True, "error": str(e)}
+
+
+@app.get("/keepalive-setup")
+async def keepalive_setup_page():
+    """Russian setup page: how to keep free Render awake."""
+    return FileResponse(
+        STATIC / "keepalive-setup.html",
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 class PushSubIn(BaseModel):

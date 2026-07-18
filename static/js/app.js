@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.36";
+  const APP_VERSION = "1.37";
   const APP_UPDATE_NOTES =
-    "Обнова 1.36 готова ✓\n• Ответ: свайп вправо по сообщению\n• Голосовые / профиль";
+    "Обнова 1.37 готова ✓\n• Keep-alive: /api/ping (UptimeRobot 5 мин)\n• Ответ свайпом / голосовые";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -4317,7 +4317,7 @@
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
-        .register("/sw.js?v=14", { scope: "/" })
+        .register("/sw.js?v=15", { scope: "/" })
         .catch((e) => console.warn("SW register", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
         const d = ev.data || {};
@@ -4388,7 +4388,7 @@
         if (!fromButton) return;
       }
       // ensure SW controlling page
-      let reg = await navigator.serviceWorker.register("/sw.js?v=14", { scope: "/" });
+      let reg = await navigator.serviceWorker.register("/sw.js?v=15", { scope: "/" });
       reg = await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         // wait a bit for controller
