@@ -213,7 +213,8 @@ CREATE TABLE IF NOT EXISTS messages (
     group_id INTEGER,
     msg_type TEXT NOT NULL DEFAULT 'text',
     media_url TEXT,
-    duration REAL
+    duration REAL,
+    reply_to_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS chat_groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,7 +291,8 @@ CREATE TABLE IF NOT EXISTS messages (
     group_id INTEGER,
     msg_type TEXT NOT NULL DEFAULT 'text',
     media_url TEXT,
-    duration DOUBLE PRECISION
+    duration DOUBLE PRECISION,
+    reply_to_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS chat_groups (
     id SERIAL PRIMARY KEY,
@@ -352,6 +354,7 @@ async def init_schema(db_path: Path | None = None) -> None:
                 ("msg_type", "ALTER TABLE messages ADD COLUMN msg_type TEXT DEFAULT 'text'"),
                 ("media_url", "ALTER TABLE messages ADD COLUMN media_url TEXT"),
                 ("duration", "ALTER TABLE messages ADD COLUMN duration REAL"),
+                ("reply_to_id", "ALTER TABLE messages ADD COLUMN reply_to_id INTEGER"),
             ]:
                 if col not in cols:
                     try:
@@ -429,6 +432,17 @@ async def init_schema(db_path: Path | None = None) -> None:
             except Exception:
                 try:
                     await db.execute("ALTER TABLE chat_groups ADD COLUMN avatar TEXT")
+                except Exception:
+                    pass
+            try:
+                await db.execute(
+                    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER"
+                )
+            except Exception:
+                try:
+                    await db.execute(
+                        "ALTER TABLE messages ADD COLUMN reply_to_id INTEGER"
+                    )
                 except Exception:
                     pass
             await db.commit()

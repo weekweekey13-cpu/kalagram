@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.35";
+  const APP_VERSION = "1.36";
   const APP_UPDATE_NOTES =
-    "Обнова 1.35 готова ✓\n• Голосовые с иконки «Домой» (PWA mic fix)\n• Safari + ПК как раньше";
+    "Обнова 1.36 готова ✓\n• Ответ: свайп вправо по сообщению\n• Голосовые / профиль";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -99,6 +99,7 @@
     recordReady: false, // true once MediaRecorder actually started
     appVersion: APP_VERSION,
     systemChat: false, // viewing Калаграм update inbox
+    replyTo: null, // { id, text, msg_type, sender_name }
   };
 
   // ── API ──────────────────────────────────
@@ -1490,6 +1491,7 @@
     stopRecording(true);
     exitSelectMode();
     leaveSystemChatIfNeeded();
+    clearReplyTo();
     state.isGroup = false;
     showPanel("chat");
     const box = $("#messages");
@@ -1529,6 +1531,7 @@
     stopRecording(true);
     exitSelectMode();
     leaveSystemChatIfNeeded();
+    clearReplyTo();
     state.isGroup = true;
     showPanel("chat");
     const box = $("#messages");
@@ -2074,6 +2077,10 @@
     let pressId = null;
     let startX = 0;
     let startY = 0;
+    let swipeBubble = null;
+    let swipeActive = false;
+    let swipeDx = 0;
+    let axis = null; // "h" | "v" | null
 
     const clearPress = () => {
       clearTimeout(state.longPressTimer);
@@ -2084,7 +2091,38 @@
       pressId = null;
     };
 
+    const endSwipe = (commit) => {
+      if (!swipeBubble) return;
+      const b = swipeBubble;
+      const dx = swipeDx;
+      b.classList.remove("swiping");
+      b.style.transform = "";
+      swipeBubble = null;
+      swipeActive = false;
+      swipeDx = 0;
+      axis = null;
+      if (commit && dx >= 56) {
+        const id = Number(b.dataset.id);
+        const m = state.messages.find((x) => Number(x.id) === id);
+        if (m && m.sender_id !== state.me?.id) {
+          setReplyTo(m);
+          try {
+            if (navigator.vibrate) navigator.vibrate(12);
+          } catch {}
+        }
+      }
+    };
+
     box.addEventListener("pointerdown", (e) => {
+      // jump to quoted message
+      const jump = e.target.closest(".bubble-reply");
+      if (jump && jump.dataset.jump) {
+        e.preventDefault();
+        e.stopPropagation();
+        scrollToMessageId(jump.dataset.jump);
+        return;
+      }
+
       const bubble = e.target.closest(".bubble");
       if (!bubble || bubble.classList.contains("system")) return;
       if (e.target.closest(".voice-play, .select-action, button")) return;
@@ -2100,24 +2138,64 @@
       pressId = id;
       startX = e.clientX;
       startY = e.clientY;
+      axis = null;
+      swipeDx = 0;
+      // Swipe-to-reply only for peer messages
+      if (bubble.classList.contains("them") && !state.recordingActive) {
+        swipeBubble = bubble;
+        swipeActive = true;
+        try {
+          bubble.setPointerCapture(e.pointerId);
+        } catch {}
+      }
       bubble.classList.add("pressing");
       clearTimeout(state.longPressTimer);
       state.longPressTimer = setTimeout(() => {
+        if (swipeDx > 12 || axis === "h") return;
         bubble.classList.remove("pressing");
         enterSelectMode(id);
         pressId = null;
+        endSwipe(false);
       }, 450);
     });
 
     box.addEventListener("pointermove", (e) => {
-      if (pressId == null) return;
-      if (Math.abs(e.clientX - startX) > 14 || Math.abs(e.clientY - startY) > 14) {
-        clearPress();
+      if (pressId == null && !swipeActive) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+
+      if (!axis && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+        axis = Math.abs(dx) > Math.abs(dy) ? "h" : "v";
+        if (axis === "h") clearPress();
+        if (axis === "v") {
+          endSwipe(false);
+          clearPress();
+        }
+      }
+
+      if (axis === "h" && swipeActive && swipeBubble) {
+        // only swipe right
+        const x = Math.max(0, Math.min(88, dx));
+        swipeDx = x;
+        swipeBubble.classList.add("swiping");
+        swipeBubble.style.transform = `translateX(${x}px)`;
+        try {
+          e.preventDefault();
+        } catch {}
+      } else if (pressId != null && axis !== "h") {
+        if (Math.abs(dx) > 14 || Math.abs(dy) > 14) clearPress();
       }
     });
 
-    box.addEventListener("pointerup", clearPress);
-    box.addEventListener("pointercancel", clearPress);
+    box.addEventListener("pointerup", (e) => {
+      const commit = axis === "h" && swipeDx >= 56;
+      endSwipe(commit);
+      clearPress();
+    });
+    box.addEventListener("pointercancel", () => {
+      endSwipe(false);
+      clearPress();
+    });
 
     box.addEventListener("contextmenu", (e) => {
       const bubble = e.target.closest(".bubble");
@@ -2193,6 +2271,61 @@
     });
   }
 
+  function replyPreviewText(m) {
+    if (!m) return "";
+    if (m.msg_type === "voice") return "🎤 Голосовое";
+    const t = (m.text || "").replace(/\s+/g, " ").trim();
+    return t || "Сообщение";
+  }
+
+  function setReplyTo(msg) {
+    if (!msg || msg.msg_type === "system") return;
+    const name =
+      msg.sender?.display_name ||
+      msg.sender?.nick ||
+      (msg.sender_id === state.me?.id ? "Вы" : state.peer?.display_name || state.peer?.nick || "Собеседник");
+    state.replyTo = {
+      id: Number(msg.id),
+      text: replyPreviewText(msg),
+      msg_type: msg.msg_type || "text",
+      sender_name: name,
+    };
+    renderReplyBar();
+    try {
+      $("#msg-input")?.focus();
+    } catch {}
+  }
+
+  function clearReplyTo() {
+    state.replyTo = null;
+    renderReplyBar();
+  }
+
+  function renderReplyBar() {
+    const bar = $("#reply-bar");
+    if (!bar) return;
+    if (!state.replyTo) {
+      bar.classList.add("hidden");
+      return;
+    }
+    bar.classList.remove("hidden");
+    const lab = $("#reply-bar-label");
+    const tx = $("#reply-bar-text");
+    if (lab) lab.textContent = "Ответ · " + (state.replyTo.sender_name || "");
+    if (tx) tx.textContent = state.replyTo.text || "";
+  }
+
+  function scrollToMessageId(id) {
+    const el = document.querySelector(`#messages .bubble[data-id="${id}"]`);
+    if (!el) {
+      toast("Сообщение не в ленте");
+      return;
+    }
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("reply-flash");
+    setTimeout(() => el.classList.remove("reply-flash"), 500);
+  }
+
   function renderMessages(scrollBottom = false) {
     const box = $("#messages");
     if (!box) return;
@@ -2232,14 +2365,28 @@
       } else {
         body = `<div class="text">${formatMessageText(m.text)}</div>`;
       }
+      let replyHtml = "";
+      const rt = m.reply_to;
+      if (rt) {
+        const rn = escapeHtml(rt.sender_name || "Сообщение");
+        const rtxt = escapeHtml((rt.text || "").slice(0, 120));
+        replyHtml = `
+          <div class="bubble-reply" data-jump="${rt.id}" role="button" tabindex="0">
+            <div class="bubble-reply-name">${rn}</div>
+            <div class="bubble-reply-text">${rtxt}</div>
+          </div>`;
+      }
       html += `
-        <div class="bubble ${mine ? "me" : "them"} mine-selectable ${selected ? "selected" : ""}" data-id="${m.id}">
-          <span class="sel-check" aria-hidden="true"></span>
-          ${senderName ? `<div class="bubble-sender">${escapeHtml(senderName)}</div>` : ""}
-          ${body}
-          <div class="meta">
-            <span>${formatClock(m.created_at)}</span>
-            ${mine && !state.isGroup ? (m.read_at ? " ✓✓" : " ✓") : ""}
+        <div class="msg-row-wrap ${mine ? "mine" : "theirs"}">
+          <div class="bubble ${mine ? "me" : "them"} mine-selectable ${selected ? "selected" : ""}" data-id="${m.id}">
+            <span class="sel-check" aria-hidden="true"></span>
+            ${senderName ? `<div class="bubble-sender">${escapeHtml(senderName)}</div>` : ""}
+            ${replyHtml}
+            ${body}
+            <div class="meta">
+              <span>${formatClock(m.created_at)}</span>
+              ${mine && !state.isGroup ? (m.read_at ? " ✓✓" : " ✓") : ""}
+            </div>
           </div>
         </div>`;
     }
@@ -2474,20 +2621,24 @@
     const input = $("#msg-input");
     const text = input.value.trim();
     if (!text || !state.peer) return;
+    const replyId = state.replyTo ? state.replyTo.id : null;
     input.value = "";
     autoResize(input);
     updateComposerMode();
+    clearReplyTo();
     try {
+      const payload = { text };
+      if (replyId) payload.reply_to_id = replyId;
       let msg;
       if (state.isGroup) {
         msg = await api(`/api/groups/${state.peer.id}/messages`, {
           method: "POST",
-          json: { text },
+          json: payload,
         });
       } else {
         msg = await api(`/api/messages/${state.peer.id}`, {
           method: "POST",
-          json: { text },
+          json: payload,
         });
       }
       if (!state.messages.some((m) => m.id === msg.id)) {
@@ -2498,6 +2649,11 @@
     } catch (err) {
       input.value = text;
       updateComposerMode();
+      if (replyId) {
+        // restore reply bar if send failed
+        const m = state.messages.find((x) => Number(x.id) === Number(replyId));
+        if (m) setReplyTo(m);
+      }
       toast(err.message);
     }
   }
@@ -3880,11 +4036,14 @@
       stopRecording(true);
       exitSelectMode();
       leaveSystemChatIfNeeded();
+      clearReplyTo();
       state.peer = null;
       state.isGroup = false;
       showPanel("chats");
       loadChats();
     });
+
+    $("#btn-reply-cancel")?.addEventListener("click", () => clearReplyTo());
 
     // Open friend / group profile — capture-phase so iOS never misses the tap
     if (!document._peerProfileDelegated) {
@@ -4158,7 +4317,7 @@
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
-        .register("/sw.js?v=13", { scope: "/" })
+        .register("/sw.js?v=14", { scope: "/" })
         .catch((e) => console.warn("SW register", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
         const d = ev.data || {};
@@ -4229,7 +4388,7 @@
         if (!fromButton) return;
       }
       // ensure SW controlling page
-      let reg = await navigator.serviceWorker.register("/sw.js?v=13", { scope: "/" });
+      let reg = await navigator.serviceWorker.register("/sw.js?v=14", { scope: "/" });
       reg = await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         // wait a bit for controller

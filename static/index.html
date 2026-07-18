@@ -12,7 +12,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="stylesheet" href="/static/css/style.css?v=39" />
+  <link rel="stylesheet" href="/static/css/style.css?v=40" />
   <!-- iPhone / iPad home screen icons -->
   <link rel="apple-touch-icon" href="/static/icons/icon-180.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/icon-180.png" />
@@ -185,6 +185,17 @@
         </header>
         <div id="messages" class="messages scroll"></div>
         <div class="composer safe-bottom">
+          <!-- Reply preview (swipe-right on peer message) -->
+          <div id="reply-bar" class="reply-bar hidden" aria-live="polite">
+            <div class="reply-bar-accent"></div>
+            <div class="reply-bar-body">
+              <div class="reply-bar-label" id="reply-bar-label">Ответ</div>
+              <div class="reply-bar-text" id="reply-bar-text"></div>
+            </div>
+            <button type="button" class="icon-btn reply-bar-close" id="btn-reply-cancel" aria-label="Отменить ответ">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
           <div id="record-bar" class="record-bar hidden">
             <button type="button" class="icon-btn rec-cancel" id="btn-rec-cancel" aria-label="Отмена"
               onclick="if(window.kalagramMicCancel){window.kalagramMicCancel();}return false;">
@@ -352,7 +363,7 @@
     // Force iOS PWA off stale shell: when this HTML is first seen after an update,
     // drop service worker + Cache API once, then reload.
     (function () {
-      var SHELL = "1.35";
+      var SHELL = "1.36";
       try {
         var key = "kalagram_shell_v";
         var prev = localStorage.getItem(key);
@@ -382,6 +393,6 @@
       } catch (e) {}
     })();
   </script>
-  <script src="/static/js/app.js?v=39"></script>
+  <script src="/static/js/app.js?v=40"></script>
 </body>
 </html>

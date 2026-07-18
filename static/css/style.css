@@ -1050,6 +1050,126 @@ img { display: block; max-width: 100%; }
   transition: none !important;
 }
 
+/* Reply bar above composer */
+.reply-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin: 0 0 8px;
+  padding: 0;
+  background: var(--bg-soft);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  min-height: 48px;
+}
+.reply-bar.hidden { display: none !important; }
+.reply-bar-accent {
+  width: 4px;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, #6c8cff, #7b5cff);
+}
+.reply-bar-body {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+.reply-bar-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+.reply-bar-text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reply-bar-close {
+  width: 44px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+/* Quoted reply inside bubble */
+.bubble-reply {
+  display: block;
+  margin: 0 0 6px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  border-left: 3px solid var(--accent-strong);
+  cursor: pointer;
+  max-width: 100%;
+}
+.bubble.me .bubble-reply {
+  background: rgba(255, 255, 255, 0.12);
+  border-left-color: rgba(255, 255, 255, 0.85);
+}
+.bubble-reply-name {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--accent-strong);
+  margin-bottom: 1px;
+}
+.bubble.me .bubble-reply-name { color: rgba(255, 255, 255, 0.95); }
+.bubble-reply-text {
+  font-size: 0.8rem;
+  opacity: 0.9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Swipe-to-reply feedback */
+.bubble.them {
+  touch-action: pan-y;
+  will-change: transform;
+  transition: transform 0.12s ease-out;
+}
+.bubble.them.swiping {
+  transition: none;
+}
+.bubble.them.reply-flash {
+  animation: reply-flash 0.45s ease;
+}
+@keyframes reply-flash {
+  0% { box-shadow: 0 0 0 0 rgba(108, 140, 255, 0.55); }
+  100% { box-shadow: 0 0 0 10px rgba(108, 140, 255, 0); }
+}
+.msg-swipe-hint {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%) scale(0.6);
+  opacity: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  transition: opacity 0.1s, transform 0.1s;
+  z-index: 0;
+}
+.msg-row-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+}
+.msg-row-wrap.mine {
+  align-items: flex-end;
+}
+
 /* Keyboard open: drop home-indicator padding so field sits tight above keyboard */
 body.kb-open #panel-chat .composer {
   padding-bottom: 8px;

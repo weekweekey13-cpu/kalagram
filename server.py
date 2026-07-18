@@ -130,6 +130,7 @@ class LoginIn(BaseModel):
 
 class MessageIn(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000)
+    reply_to_id: int | None = None
 
 
 class DeleteMessagesIn(BaseModel):
@@ -333,6 +334,10 @@ async def db_public_user(user_id: int) -> dict[str, Any] | None:
 
 def msg_dict(r: aiosqlite.Row | dict) -> dict[str, Any]:
     get = r.__getitem__ if not isinstance(r, dict) else r.get
+    try:
+        reply_to_id = get("reply_to_id")
+    except Exception:
+        reply_to_id = None
     return {
         "id": get("id"),
         "sender_id": get("sender_id"),
@@ -344,7 +349,85 @@ def msg_dict(r: aiosqlite.Row | dict) -> dict[str, Any]:
         "duration": get("duration"),
         "created_at": get("created_at"),
         "read_at": get("read_at"),
+        "reply_to_id": reply_to_id,
     }
+
+
+async def fetch_reply_preview(reply_to_id: int | None) -> dict[str, Any] | None:
+    if not reply_to_id:
+        return None
+    async with connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM messages WHERE id = ?", (int(reply_to_id),))
+        row = await cur.fetchone()
+    if not row:
+        return {"id": int(reply_to_id), "text": "Сообщение удалено", "msg_type": "text", "deleted": True}
+    m = msg_dict(row)
+    su = await db_public_user(m["sender_id"])
+    preview = m["text"] or ""
+    if m.get("msg_type") == "voice":
+        preview = "🎤 Голосовое"
+    elif not preview:
+        preview = "Сообщение"
+    return {
+        "id": m["id"],
+        "text": preview[:200],
+        "msg_type": m.get("msg_type") or "text",
+        "sender_id": m["sender_id"],
+        "sender_name": (su or {}).get("display_name") or (su or {}).get("nick") or "?",
+    }
+
+
+async def attach_replies(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ids = []
+    for m in messages:
+        rid = m.get("reply_to_id")
+        if rid:
+            ids.append(int(rid))
+    if not ids:
+        for m in messages:
+            m["reply_to"] = None
+        return messages
+    uniq = list({i for i in ids})
+    previews: dict[int, dict[str, Any]] = {}
+    async with connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # sqlite/pg both accept tuple placeholders via ?
+        placeholders = ",".join("?" for _ in uniq)
+        cur = await db.execute(
+            f"SELECT * FROM messages WHERE id IN ({placeholders})",
+            tuple(uniq),
+        )
+        rows = await cur.fetchall()
+    for row in rows:
+        m = msg_dict(row)
+        su = await db_public_user(m["sender_id"])
+        preview = m["text"] or ""
+        if m.get("msg_type") == "voice":
+            preview = "🎤 Голосовое"
+        elif not preview:
+            preview = "Сообщение"
+        previews[int(m["id"])] = {
+            "id": m["id"],
+            "text": preview[:200],
+            "msg_type": m.get("msg_type") or "text",
+            "sender_id": m["sender_id"],
+            "sender_name": (su or {}).get("display_name") or (su or {}).get("nick") or "?",
+        }
+    for m in messages:
+        rid = m.get("reply_to_id")
+        if rid and int(rid) in previews:
+            m["reply_to"] = previews[int(rid)]
+        elif rid:
+            m["reply_to"] = {
+                "id": int(rid),
+                "text": "Сообщение удалено",
+                "msg_type": "text",
+                "deleted": True,
+            }
+        else:
+            m["reply_to"] = None
+    return messages
 
 
 async def is_group_member(group_id: int, user_id: int) -> bool:
@@ -487,31 +570,55 @@ async def insert_message(
     msg_type: str = "text",
     media_url: str | None = None,
     duration: float | None = None,
+    reply_to_id: int | None = None,
 ) -> dict[str, Any]:
     now = time.time()
     # Older DBs may have receiver_id NOT NULL — use 0 for group messages
     rid = receiver_id if group_id is None else (receiver_id or 0)
+    rt = int(reply_to_id) if reply_to_id else None
     async with connect(DB_PATH) as db:
-        cur = await db.execute(
-            """
-            INSERT INTO messages
-              (sender_id, receiver_id, group_id, text, msg_type, media_url, duration, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                sender_id,
-                rid,
-                group_id,
-                text or "",
-                msg_type,
-                media_url,
-                duration,
-                now,
-            ),
-        )
+        try:
+            cur = await db.execute(
+                """
+                INSERT INTO messages
+                  (sender_id, receiver_id, group_id, text, msg_type, media_url, duration, created_at, reply_to_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sender_id,
+                    rid,
+                    group_id,
+                    text or "",
+                    msg_type,
+                    media_url,
+                    duration,
+                    now,
+                    rt,
+                ),
+            )
+        except Exception:
+            # Older schema without reply_to_id
+            cur = await db.execute(
+                """
+                INSERT INTO messages
+                  (sender_id, receiver_id, group_id, text, msg_type, media_url, duration, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sender_id,
+                    rid,
+                    group_id,
+                    text or "",
+                    msg_type,
+                    media_url,
+                    duration,
+                    now,
+                ),
+            )
+            rt = None
         await db.commit()
         mid = cur.lastrowid
-    return {
+    out = {
         "id": mid,
         "sender_id": sender_id,
         "receiver_id": receiver_id if group_id is None else None,
@@ -522,7 +629,46 @@ async def insert_message(
         "duration": duration,
         "created_at": now,
         "read_at": None,
+        "reply_to_id": rt,
+        "reply_to": None,
     }
+    if rt:
+        out["reply_to"] = await fetch_reply_preview(rt)
+    return out
+
+
+async def validate_reply_target(
+    reply_to_id: int | None,
+    *,
+    user_id: int,
+    peer_id: int | None = None,
+    group_id: int | None = None,
+) -> int | None:
+    if not reply_to_id:
+        return None
+    rid = int(reply_to_id)
+    async with connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM messages WHERE id = ?", (rid,))
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail="Сообщение для ответа не найдено")
+    m = msg_dict(row)
+    if group_id is not None:
+        if int(m.get("group_id") or 0) != int(group_id):
+            raise HTTPException(status_code=400, detail="Ответ только в этом чате")
+    else:
+        # DM: message must be in this pair
+        a, b = int(user_id), int(peer_id)
+        sid, recv = int(m["sender_id"]), m.get("receiver_id")
+        if m.get("group_id"):
+            raise HTTPException(status_code=400, detail="Ответ только в этом чате")
+        if recv is None:
+            raise HTTPException(status_code=400, detail="Ответ только в этом чате")
+        pair = {sid, int(recv)}
+        if pair != {a, b}:
+            raise HTTPException(status_code=400, detail="Ответ только в этом чате")
+    return rid
 
 
 async def broadcast_message(
@@ -843,11 +989,11 @@ app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 # Bump this on every user-facing release — client shows «SMS» from Калаграм
 # (only for nick JOPA on the client)
-APP_VERSION = "1.35"
+APP_VERSION = "1.36"
 APP_UPDATE_NOTES = (
-    "Обнова 1.35 готова ✓\n"
-    "• Голосовые с иконки «Домой» (fix микрофона PWA)\n"
-    "• Safari + ПК как раньше"
+    "Обнова 1.36 готова ✓\n"
+    "• Ответ на сообщение: свайп вправо\n"
+    "• Голосовые / профиль / шапка"
 )
 
 
@@ -1643,13 +1789,14 @@ async def get_group_messages(
                 (group_id, user["id"], max_id),
             )
             await db.commit()
-    # attach sender mini-profiles
+    # attach sender mini-profiles + reply previews
     messages = []
     for r in rows:
         m = msg_dict(r)
         su = await db_public_user(m["sender_id"])
         m["sender"] = su
         messages.append(m)
+    messages = await attach_replies(messages)
     return {"group": info, "messages": messages}
 
 
@@ -1664,8 +1811,15 @@ async def send_group_message(
     text = body.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
+    rt = await validate_reply_target(
+        body.reply_to_id, user_id=user["id"], group_id=group_id
+    )
     msg = await insert_message(
-        sender_id=user["id"], group_id=group_id, text=text, msg_type="text"
+        sender_id=user["id"],
+        group_id=group_id,
+        text=text,
+        msg_type="text",
+        reply_to_id=rt,
     )
     su = await db_public_user(user["id"])
     msg["sender"] = su
@@ -1899,6 +2053,7 @@ async def get_messages(
         peer_id,
         {"type": "read", "reader_id": uid, "peer_id": peer_id},
     )
+    messages = await attach_replies([msg_dict(r) for r in rows])
     return {
         "peer": {
             "id": peer["id"],
@@ -1909,7 +2064,7 @@ async def get_messages(
             "online": manager.is_online(peer["id"]),
             "is_group": False,
         },
-        "messages": [msg_dict(r) for r in rows],
+        "messages": messages,
     }
 
 
@@ -2043,11 +2198,15 @@ async def send_message(
     text = body.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
+    rt = await validate_reply_target(
+        body.reply_to_id, user_id=user["id"], peer_id=peer_id
+    )
     msg = await insert_message(
         sender_id=user["id"],
         receiver_id=peer_id,
         text=text,
         msg_type="text",
+        reply_to_id=rt,
     )
     await broadcast_message(msg, user)
     now = time.time()
