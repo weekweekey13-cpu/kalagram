@@ -219,7 +219,15 @@ CREATE TABLE IF NOT EXISTS chat_groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     owner_id INTEGER NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    avatar TEXT
+);
+CREATE TABLE IF NOT EXISTS notification_mutes (
+    user_id INTEGER NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    muted INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (user_id, target_type, target_id)
 );
 CREATE TABLE IF NOT EXISTS group_members (
     group_id INTEGER NOT NULL,
@@ -288,7 +296,15 @@ CREATE TABLE IF NOT EXISTS chat_groups (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     owner_id INTEGER NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL
+    created_at DOUBLE PRECISION NOT NULL,
+    avatar TEXT
+);
+CREATE TABLE IF NOT EXISTS notification_mutes (
+    user_id INTEGER NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    muted INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (user_id, target_type, target_id)
 );
 CREATE TABLE IF NOT EXISTS group_members (
     group_id INTEGER NOT NULL,
@@ -371,8 +387,50 @@ async def init_schema(db_path: Path | None = None) -> None:
                 """
             )
             await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_mutes (
+                    user_id INTEGER NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    muted INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (user_id, target_type, target_id)
+                )
+                """
+            )
+            # group avatar column (older DBs)
+            try:
+                cur = await db.execute("PRAGMA table_info(chat_groups)")
+                gcols = {r[1] for r in await cur.fetchall()}
+                if "avatar" not in gcols:
+                    await db.execute("ALTER TABLE chat_groups ADD COLUMN avatar TEXT")
+            except Exception:
+                pass
+            await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id)"
             )
+            await db.commit()
+        else:
+            # Postgres: ensure mute table + group avatar
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_mutes (
+                    user_id INTEGER NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    muted INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (user_id, target_type, target_id)
+                )
+                """
+            )
+            try:
+                await db.execute(
+                    "ALTER TABLE chat_groups ADD COLUMN IF NOT EXISTS avatar TEXT"
+                )
+            except Exception:
+                try:
+                    await db.execute("ALTER TABLE chat_groups ADD COLUMN avatar TEXT")
+                except Exception:
+                    pass
             await db.commit()
 
 

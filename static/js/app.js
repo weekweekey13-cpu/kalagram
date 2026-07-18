@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.26";
+  const APP_VERSION = "1.27";
   const APP_UPDATE_NOTES =
-    "Обнова 1.26 готова ✓\n• Keep-alive каждые 15 мин (сайт не засыпает)\n• Пинг → @Dada";
+    "Обнова 1.27 готова ✓\n• Профиль друга/группы из шапки чата\n• Уведомления на чат вкл/выкл\n• Фото группы";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -338,7 +338,40 @@
     el.querySelectorAll(":scope > .dot").forEach((d) => d.remove());
 
     if (isGroup) {
-      el.classList.add("group-av", "has-img");
+      el.classList.add("group-av");
+      el.style.color = "#fff";
+      const gName = user?.display_name || user?.name || "Группа";
+      const gAv = user?.avatar;
+      if (gAv) {
+        el.classList.add("has-img");
+        el.style.background = "";
+        if (!img) {
+          img = document.createElement("img");
+          img.className = "avatar-photo";
+          img.alt = gName;
+          img.decoding = "async";
+          el.insertBefore(img, ini);
+        }
+        const src =
+          gAv + (gAv.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(String(gAv).split("/").pop() || "");
+        if (img.dataset.src !== src) {
+          img.dataset.src = src;
+          img.src = src;
+        }
+        img.onerror = () => {
+          el.classList.remove("has-img");
+          img.style.display = "none";
+          ini.hidden = false;
+          ini.textContent = "👥";
+          el.style.background = "linear-gradient(145deg, #5b7cfa, #a56cff)";
+        };
+        img.onload = () => {
+          img.style.display = "block";
+          ini.hidden = true;
+        };
+        return;
+      }
+      el.classList.add("has-img");
       el.style.background = "linear-gradient(145deg, #5b7cfa, #a56cff)";
       if (img) {
         img.remove();
@@ -346,7 +379,6 @@
       }
       ini.textContent = "👥";
       ini.hidden = false;
-      el.style.color = "#fff";
       return;
     }
 
@@ -538,8 +570,13 @@
     state.activePanel = name;
     if (name === "chats" || name === "contacts") state.listPanel = name;
 
-    const overlays = ["#panel-search", "#panel-profile", "#panel-group"];
-    const hideOverlays = () => overlays.forEach((s) => $(s).classList.add("hidden"));
+    const overlays = [
+      "#panel-search",
+      "#panel-profile",
+      "#panel-group",
+      "#panel-peer-profile",
+    ];
+    const hideOverlays = () => overlays.forEach((s) => $(s)?.classList.add("hidden"));
 
     const showList = (which) => {
       $("#panel-chats").classList.toggle("hidden", which !== "chats");
@@ -586,6 +623,8 @@
     } else if (name === "group") {
       $("#panel-group").classList.remove("hidden");
       openGroupCreate();
+    } else if (name === "peer-profile") {
+      $("#panel-peer-profile")?.classList.remove("hidden");
     }
   }
 
@@ -1179,8 +1218,232 @@
     $("#peer-name").textContent = p.display_name || p.name || "—";
     const st = $("#peer-status");
     st.textContent = lastSeenText(p);
-    st.classList.toggle("online", !!p.online && !p.is_group);
-    setAvatar($("#peer-avatar"), p, { isGroup: p.is_group });
+    st.classList.toggle("online", !!p.online && !p.is_group && !p.is_system);
+    setAvatar($("#peer-avatar"), p, { isGroup: !!(p.is_group || state.isGroup) });
+  }
+
+  // ── Peer / group profile (from chat header) ──
+  const peerProfile = {
+    data: null, // loaded user or group
+    isGroup: false,
+    muted: false,
+  };
+
+  async function openPeerProfileFromChat() {
+    if (!state.peer || state.systemChat || state.peer.is_system) return;
+    const isG = !!(state.isGroup || state.peer.is_group);
+    try {
+      if (isG) {
+        const info = await api(`/api/groups/${state.peer.id}`);
+        peerProfile.data = info;
+        peerProfile.isGroup = true;
+        peerProfile.muted = !!info.muted;
+        // keep peer avatar/name in sync
+        state.peer = {
+          ...state.peer,
+          ...info,
+          is_group: true,
+          display_name: info.name,
+        };
+      } else {
+        const info = await api(`/api/users/${state.peer.id}/profile`);
+        peerProfile.data = info;
+        peerProfile.isGroup = false;
+        peerProfile.muted = !!info.muted;
+        state.peer = { ...state.peer, ...info, is_group: false };
+      }
+      renderPeerProfilePanel();
+      showPanel("peer-profile");
+    } catch (err) {
+      toast(err.message || "Не удалось открыть профиль");
+    }
+  }
+
+  function renderPeerProfilePanel() {
+    const d = peerProfile.data;
+    if (!d) return;
+    const isG = peerProfile.isGroup;
+    const title = $("#peer-profile-title");
+    const nameEl = $("#peer-profile-name");
+    const subEl = $("#peer-profile-sub");
+    const avEl = $("#peer-profile-avatar");
+    const hint = $("#peer-profile-avatar-hint");
+    const membersWrap = $("#peer-profile-members-wrap");
+    const membersList = $("#peer-profile-members");
+    const notifyBtn = $("#btn-peer-notify");
+
+    if (title) title.textContent = isG ? "Группа" : "Профиль";
+    if (nameEl) nameEl.textContent = isG ? d.name || d.display_name : d.display_name || d.nick;
+    if (subEl) {
+      if (isG) {
+        subEl.textContent = `${d.member_count || (d.members || []).length || 0} участников`;
+      } else {
+        subEl.textContent = d.online ? "в сети" : "@" + (d.nick || "");
+      }
+    }
+    if (avEl) {
+      setAvatar(avEl, isG ? { ...d, display_name: d.name, is_group: true } : d, {
+        isGroup: isG,
+      });
+      const isOwner = isG && (d.is_owner || d.owner_id === state.me?.id);
+      avEl.classList.toggle("editable", !!isOwner);
+      if (hint) hint.classList.toggle("hidden", !isOwner);
+    }
+    updatePeerNotifyButton();
+
+    if (membersWrap && membersList) {
+      if (isG && Array.isArray(d.members)) {
+        membersWrap.classList.remove("hidden");
+        membersList.innerHTML = d.members
+          .map((m) => {
+            const owner =
+              m.id === d.owner_id
+                ? ' <span class="group-badge">создатель</span>'
+                : "";
+            return `
+            <div class="row" data-id="${m.id}">
+              <div class="avatar avatar-md" data-av="pm-${m.id}"></div>
+              <div class="row-body">
+                <div class="row-top">
+                  <div class="row-name">${escapeHtml(m.display_name || m.nick)}${owner}</div>
+                </div>
+                <div class="row-bottom">
+                  <div class="row-preview">${m.online ? "в сети" : "@" + escapeHtml(m.nick || "")}</div>
+                </div>
+              </div>
+            </div>`;
+          })
+          .join("");
+        d.members.forEach((m) => {
+          setAvatar(membersList.querySelector(`[data-av="pm-${m.id}"]`), m);
+        });
+      } else {
+        membersWrap.classList.add("hidden");
+        membersList.innerHTML = "";
+      }
+    }
+  }
+
+  function updatePeerNotifyButton() {
+    const btn = $("#btn-peer-notify");
+    if (!btn) return;
+    const on = !peerProfile.muted;
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.textContent = on ? "🔔 Уведомления: вкл" : "🔕 Уведомления: выкл";
+    btn.classList.toggle("btn-primary", on);
+    btn.classList.toggle("btn-ghost", !on);
+  }
+
+  async function togglePeerNotifications() {
+    const d = peerProfile.data;
+    if (!d) return;
+    const next = !peerProfile.muted;
+    try {
+      const body = peerProfile.isGroup
+        ? { group_id: d.id, muted: next }
+        : { peer_id: d.id, muted: next };
+      const r = await api("/api/notifications/mute", { method: "POST", json: body });
+      peerProfile.muted = !!r.muted;
+      if (peerProfile.data) peerProfile.data.muted = peerProfile.muted;
+      updatePeerNotifyButton();
+      toast(peerProfile.muted ? "Уведомления выключены" : "Уведомления включены");
+    } catch (err) {
+      toast(err.message || "Не удалось сохранить");
+    }
+  }
+
+  function openPhotoLightbox(src) {
+    if (!src) return;
+    const box = $("#photo-lightbox");
+    const img = $("#photo-lightbox-img");
+    if (!box || !img) return;
+    img.src = src;
+    img.style.transform = "";
+    box.classList.remove("hidden");
+    box.setAttribute("aria-hidden", "false");
+  }
+
+  function closePhotoLightbox() {
+    const box = $("#photo-lightbox");
+    const img = $("#photo-lightbox-img");
+    if (!box) return;
+    box.classList.add("hidden");
+    box.setAttribute("aria-hidden", "true");
+    if (img) {
+      img.src = "";
+      img.style.transform = "";
+    }
+  }
+
+  function bindPhotoLightbox() {
+    const box = $("#photo-lightbox");
+    if (!box || box._bound) return;
+    box._bound = true;
+    let x0 = 0,
+      y0 = 0,
+      dx = 0,
+      dy = 0,
+      dragging = false;
+    const img = $("#photo-lightbox-img");
+
+    const onStart = (x, y) => {
+      dragging = true;
+      x0 = x;
+      y0 = y;
+      dx = 0;
+      dy = 0;
+    };
+    const onMove = (x, y) => {
+      if (!dragging || !img) return;
+      dx = x - x0;
+      dy = y - y0;
+      img.style.transform = `translate(${dx}px, ${dy}px)`;
+    };
+    const onEnd = () => {
+      if (!dragging) return;
+      dragging = false;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 48) closePhotoLightbox();
+      else if (img) img.style.transform = "";
+    };
+
+    box.addEventListener(
+      "touchstart",
+      (e) => {
+        if (!e.touches?.[0]) return;
+        onStart(e.touches[0].clientX, e.touches[0].clientY);
+      },
+      { passive: true }
+    );
+    box.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!e.touches?.[0]) return;
+        onMove(e.touches[0].clientX, e.touches[0].clientY);
+      },
+      { passive: true }
+    );
+    box.addEventListener("touchend", onEnd, { passive: true });
+    box.addEventListener("touchcancel", onEnd, { passive: true });
+
+    box.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      onStart(e.clientX, e.clientY);
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (dragging) onMove(e.clientX, e.clientY);
+    });
+    window.addEventListener("mouseup", onEnd);
+    box.addEventListener("click", (e) => {
+      // click backdrop / image closes if almost no drag
+      if (Math.hypot(dx, dy) < 12) closePhotoLightbox();
+    });
+  }
+
+  function peerProfilePhotoUrl() {
+    const d = peerProfile.data;
+    if (!d || !d.avatar) return null;
+    return d.avatar;
   }
 
   function exitSelectMode() {
@@ -2883,6 +3146,75 @@
       showPanel("chats");
       loadChats();
     });
+
+    // Open friend / group profile from chat header
+    $("#btn-peer-info")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      openPeerProfileFromChat();
+    });
+    $("#btn-close-peer-profile")?.addEventListener("click", () => {
+      showPanel("chat");
+    });
+    $("#btn-peer-open-chat")?.addEventListener("click", () => {
+      showPanel("chat");
+    });
+    $("#btn-peer-notify")?.addEventListener("click", () => {
+      togglePeerNotifications();
+    });
+    $("#peer-profile-avatar")?.addEventListener("click", () => {
+      const d = peerProfile.data;
+      if (!d) return;
+      const isG = peerProfile.isGroup;
+      const isOwner = isG && (d.is_owner || d.owner_id === state.me?.id);
+      // Owner tap on group avatar without photo → pick file; with photo → lightbox (long path: change via hint)
+      if (isOwner && !d.avatar) {
+        $("#group-avatar-input")?.click();
+        return;
+      }
+      if (d.avatar) {
+        openPhotoLightbox(d.avatar);
+        return;
+      }
+      if (isOwner) $("#group-avatar-input")?.click();
+    });
+    // Owner can change group photo via hint area or long-press style: second button
+    $("#peer-profile-avatar-hint")?.addEventListener("click", () => {
+      if (peerProfile.isGroup && peerProfile.data?.is_owner) {
+        $("#group-avatar-input")?.click();
+      }
+    });
+    $("#group-avatar-input")?.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = "";
+      if (!file || !peerProfile.isGroup || !peerProfile.data) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        toast("Загрузка…", 1500);
+        const res = await fetch(`/api/groups/${peerProfile.data.id}/avatar`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${state.token}` },
+          body: fd,
+          credentials: "include",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "Не удалось обновить фото");
+        peerProfile.data = data;
+        state.peer = {
+          ...state.peer,
+          ...data,
+          is_group: true,
+          display_name: data.name,
+        };
+        renderPeerProfilePanel();
+        renderPeerHeader();
+        loadChats().catch(() => {});
+        toast("Фото группы обновлено");
+      } catch (err) {
+        toast(err.message || "Ошибка загрузки");
+      }
+    });
+    bindPhotoLightbox();
 
     // Selection toolbars — use capture + getElementById (reliable on iOS)
     document.addEventListener(

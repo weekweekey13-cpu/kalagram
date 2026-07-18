@@ -382,12 +382,19 @@ async def get_group_info(group_id: int) -> dict[str, Any] | None:
             (group_id,),
         )
         members = await cur.fetchall()
+    # avatar may be missing on very old rows
+    try:
+        g_avatar = g["avatar"]
+    except (KeyError, IndexError, TypeError):
+        g_avatar = None
     return {
         "id": g["id"],
         "name": g["name"],
         "owner_id": g["owner_id"],
         "created_at": g["created_at"],
+        "avatar": g_avatar,
         "is_group": True,
+        "display_name": g["name"],
         "members": [
             {
                 "id": m["id"],
@@ -401,6 +408,28 @@ async def get_group_info(group_id: int) -> dict[str, Any] | None:
         ],
         "member_count": len(members),
     }
+
+
+async def is_muted(user_id: int, *, peer_id: int | None = None, group_id: int | None = None) -> bool:
+    """True if user muted push for this DM peer or group."""
+    if group_id:
+        ttype, tid = "group", int(group_id)
+    elif peer_id:
+        ttype, tid = "dm", int(peer_id)
+    else:
+        return False
+    async with connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT muted FROM notification_mutes
+            WHERE user_id = ? AND target_type = ? AND target_id = ?
+            """,
+            (user_id, ttype, tid),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return False
+    return bool(row[0])
 
 
 async def save_voice_file(content: bytes, content_type: str | None, user_id: int) -> str:
@@ -536,7 +565,21 @@ async def broadcast_message(
     elif msg.get("msg_type") == "system":
         return
     # Skip users currently looking at Калаграм (they get in-app banner instead)
-    push_ids = [uid for uid in notify_ids if not manager.is_app_active(uid)]
+    # and users who muted this DM/group
+    push_ids: list[int] = []
+    gid = msg.get("group_id")
+    sender_id = msg.get("sender_id")
+    for uid in notify_ids:
+        if manager.is_app_active(uid):
+            continue
+        if gid:
+            if await is_muted(uid, group_id=int(gid)):
+                continue
+        else:
+            # mute keyed by the other person (sender)
+            if sender_id and await is_muted(uid, peer_id=int(sender_id)):
+                continue
+        push_ids.append(uid)
     if not push_ids:
         return
     if len(preview) > 120:
@@ -800,11 +843,12 @@ app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 # Bump this on every user-facing release — client shows «SMS» from Калаграм
 # (only for nick JOPA on the client)
-APP_VERSION = "1.26"
+APP_VERSION = "1.27"
 APP_UPDATE_NOTES = (
-    "Обнова 1.26 готова ✓\n"
-    "• Keep-alive: сайт не засыпает (пинг каждые 15 мин)\n"
-    "• Сообщения keep-alive → @Dada"
+    "Обнова 1.27 готова ✓\n"
+    "• Профиль друга / группы из шапки чата\n"
+    "• Уведомления вкл/выкл на чат\n"
+    "• Фото группы (создатель)"
 )
 
 
@@ -1392,7 +1436,124 @@ async def group_detail(group_id: int, user: dict = Depends(get_current_user)):
     info = await get_group_info(group_id)
     if not info:
         raise HTTPException(status_code=404, detail="Группа не найдена")
+    info["muted"] = await is_muted(user["id"], group_id=group_id)
+    info["is_owner"] = int(info["owner_id"]) == int(user["id"])
     return info
+
+
+@app.post("/api/groups/{group_id}/avatar")
+async def upload_group_avatar(
+    group_id: int,
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    info = await get_group_info(group_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+    if int(info["owner_id"]) != int(user["id"]):
+        raise HTTPException(status_code=403, detail="Только создатель может менять фото")
+    content = await file.read()
+    if len(content) > MAX_AVATAR:
+        raise HTTPException(status_code=400, detail="Файл больше 2 МБ")
+    if not content:
+        raise HTTPException(status_code=400, detail="Пустой файл")
+    if content[:3] == b"\xff\xd8\xff":
+        ext, mime = "jpg", "image/jpeg"
+    elif content[:8] == b"\x89PNG\r\n\x1a\n":
+        ext, mime = "png", "image/png"
+    elif content[:6] in (b"GIF87a", b"GIF89a"):
+        ext, mime = "gif", "image/gif"
+    elif content[:4] == b"RIFF" and b"WEBP" in content[:16]:
+        ext, mime = "webp", "image/webp"
+    else:
+        raise HTTPException(status_code=400, detail="Нужно фото JPG/PNG")
+    name = f"g{group_id}_{secrets.token_hex(8)}.{ext}"
+    try:
+        (AVATARS / name).write_bytes(content)
+    except OSError:
+        pass
+    await save_media(name, mime, content, DB_PATH)
+    avatar_url = f"/api/avatars/{name}"
+    async with connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE chat_groups SET avatar = ? WHERE id = ?", (avatar_url, group_id)
+        )
+        await db.commit()
+    info = await get_group_info(group_id)
+    info["muted"] = await is_muted(user["id"], group_id=group_id)
+    info["is_owner"] = True
+    return info
+
+
+@app.get("/api/users/{user_id}/profile")
+async def user_profile(user_id: int, user: dict = Depends(get_current_user)):
+    if user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="Это вы")
+    peer = await db_public_user(user_id)
+    if not peer:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    peer["online"] = manager.is_online(user_id)
+    peer["muted"] = await is_muted(user["id"], peer_id=user_id)
+    return peer
+
+
+class MuteIn(BaseModel):
+    peer_id: int | None = None
+    group_id: int | None = None
+    muted: bool = True
+
+
+@app.get("/api/notifications/mute")
+async def get_mute_status(
+    peer_id: int | None = None,
+    group_id: int | None = None,
+    user: dict = Depends(get_current_user),
+):
+    if not peer_id and not group_id:
+        raise HTTPException(status_code=400, detail="peer_id или group_id")
+    return {
+        "muted": await is_muted(user["id"], peer_id=peer_id, group_id=group_id),
+        "peer_id": peer_id,
+        "group_id": group_id,
+    }
+
+
+@app.post("/api/notifications/mute")
+async def set_mute_status(body: MuteIn, user: dict = Depends(get_current_user)):
+    if not body.peer_id and not body.group_id:
+        raise HTTPException(status_code=400, detail="peer_id или group_id")
+    if body.group_id:
+        if not await is_group_member(int(body.group_id), user["id"]):
+            raise HTTPException(status_code=403, detail="Вы не в этой группе")
+        ttype, tid = "group", int(body.group_id)
+    else:
+        if not await db_get_user(int(body.peer_id)):
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+        ttype, tid = "dm", int(body.peer_id)
+    muted = 1 if body.muted else 0
+    async with connect(DB_PATH) as db:
+        if USE_PG:
+            await db.execute(
+                """
+                INSERT INTO notification_mutes (user_id, target_type, target_id, muted)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (user_id, target_type, target_id)
+                DO UPDATE SET muted = EXCLUDED.muted
+                """,
+                (user["id"], ttype, tid, muted),
+            )
+        else:
+            await db.execute(
+                """
+                INSERT INTO notification_mutes (user_id, target_type, target_id, muted)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, target_type, target_id)
+                DO UPDATE SET muted = excluded.muted
+                """,
+                (user["id"], ttype, tid, muted),
+            )
+        await db.commit()
+    return {"ok": True, "muted": bool(muted), "peer_id": body.peer_id, "group_id": body.group_id}
 
 
 @app.post("/api/groups/{group_id}/members")
@@ -1614,6 +1775,7 @@ async def list_chats(user: dict = Depends(get_current_user)):
                 g.id AS group_id,
                 g.name,
                 g.owner_id,
+                g.avatar AS group_avatar,
                 m.id AS last_msg_id,
                 m.text AS last_text,
                 m.msg_type AS last_type,
@@ -1650,6 +1812,10 @@ async def list_chats(user: dict = Depends(get_current_user)):
                 sn = r["sender_name"] or r["sender_nick"] or ""
                 if sn:
                     preview = f"{sn}: {preview}"
+            try:
+                g_av = r["group_avatar"]
+            except (KeyError, IndexError, TypeError):
+                g_av = None
             chats.append(
                 {
                     "kind": "group",
@@ -1657,11 +1823,12 @@ async def list_chats(user: dict = Depends(get_current_user)):
                         "id": r["group_id"],
                         "nick": "",
                         "display_name": r["name"],
-                        "avatar": None,
+                        "avatar": g_av,
                         "last_seen": None,
                         "online": False,
                         "is_group": True,
                         "member_count": r["member_count"],
+                        "owner_id": r["owner_id"],
                     },
                     "last_message": {
                         "id": r["last_msg_id"],
