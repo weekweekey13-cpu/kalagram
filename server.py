@@ -496,7 +496,12 @@ async def insert_message(
     }
 
 
-async def broadcast_message(msg: dict[str, Any], sender: dict[str, Any]) -> None:
+async def broadcast_message(
+    msg: dict[str, Any],
+    sender: dict[str, Any],
+    *,
+    push: bool = True,
+) -> None:
     event = {
         "type": "message",
         "message": msg,
@@ -523,25 +528,26 @@ async def broadcast_message(msg: dict[str, Any], sender: dict[str, Any]) -> None
         await manager.send_to(sender["id"], event)
 
     # iPhone/Android home-screen push — only when app is NOT in foreground
-    if notify_ids:
-        preview = msg.get("text") or ""
-        if msg.get("msg_type") == "voice":
-            preview = "🎤 Голосовое"
-        elif msg.get("msg_type") == "system":
-            return
-        # Skip users currently looking at Калаграм (they get in-app banner instead)
-        push_ids = [uid for uid in notify_ids if not manager.is_app_active(uid)]
-        if not push_ids:
-            return
-        if len(preview) > 120:
-            preview = preview[:117] + "…"
-        title = sender.get("display_name") or sender.get("nick") or "Калаграм"
-        data = {
-            "peer_id": msg.get("group_id") or msg.get("sender_id"),
-            "group_id": msg.get("group_id"),
-            "is_group": bool(msg.get("group_id")),
-        }
-        await push_notify_users(push_ids, title, preview, data)
+    if not push or not notify_ids:
+        return
+    preview = msg.get("text") or ""
+    if msg.get("msg_type") == "voice":
+        preview = "🎤 Голосовое"
+    elif msg.get("msg_type") == "system":
+        return
+    # Skip users currently looking at Калаграм (they get in-app banner instead)
+    push_ids = [uid for uid in notify_ids if not manager.is_app_active(uid)]
+    if not push_ids:
+        return
+    if len(preview) > 120:
+        preview = preview[:117] + "…"
+    title = sender.get("display_name") or sender.get("nick") or "Калаграм"
+    data = {
+        "peer_id": msg.get("group_id") or msg.get("sender_id"),
+        "group_id": msg.get("group_id"),
+        "is_group": bool(msg.get("group_id")),
+    }
+    await push_notify_users(push_ids, title, preview, data)
 
 
 async def push_notify_users(
@@ -697,9 +703,76 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+# ── keep-alive (anti-sleep on free hosting) ─────────────────────
+# Free Render sleeps after ~15 min idle. An in-process timer only runs while
+# the dyno is awake — real wake-ups need an external ping (GitHub Actions).
+KEEPALIVE_NICK = os.environ.get("KEEPALIVE_NICK", "Dada").strip() or "Dada"
+KEEPALIVE_MINUTES = max(5, int(os.environ.get("KEEPALIVE_MINUTES", "15") or "15"))
+KEEPALIVE_BOT_NICK = "kalagram"
+_keepalive_task: asyncio.Task | None = None
+
+
+async def ensure_keepalive_bot() -> dict[str, Any] | None:
+    """Service account that sends keep-alive pings (no push spam)."""
+    bot = await db_get_user_by_nick(KEEPALIVE_BOT_NICK)
+    if bot:
+        return bot
+    now = time.time()
+    # random unguessable password — login not needed
+    pwd = hash_password(secrets.token_urlsafe(24))
+    async with connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO users (nick, password_hash, display_name, created_at, last_seen)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (KEEPALIVE_BOT_NICK, pwd, "Калаграм", now, now),
+        )
+        await db.commit()
+        uid = cur.lastrowid
+    return await db_get_user(int(uid))
+
+
+async def send_keepalive_ping() -> dict[str, Any]:
+    """Write a short in-app message to KEEPALIVE_NICK so the DB/WS stay warm."""
+    target = await db_get_user_by_nick(KEEPALIVE_NICK)
+    if not target:
+        return {"ok": False, "error": f"user {KEEPALIVE_NICK!r} not found"}
+    bot = await ensure_keepalive_bot()
+    if not bot:
+        return {"ok": False, "error": "bot missing"}
+    if int(bot["id"]) == int(target["id"]):
+        return {"ok": False, "error": "bot and target are the same user"}
+    ts = time.strftime("%H:%M", time.localtime())
+    text = f"⚡ Keep-alive {ts} · Калаграм не спит"
+    msg = await insert_message(
+        sender_id=int(bot["id"]),
+        receiver_id=int(target["id"]),
+        text=text,
+        msg_type="text",
+    )
+    # no mobile push every 15 min — only in-app / WS
+    await broadcast_message(msg, bot, push=False)
+    print(f"keepalive → @{target['nick']} id={msg['id']}")
+    return {"ok": True, "to": target["nick"], "message_id": msg["id"], "text": text}
+
+
+async def keepalive_loop() -> None:
+    interval = KEEPALIVE_MINUTES * 60
+    # first tick after a short delay (let app finish boot)
+    await asyncio.sleep(45)
+    while True:
+        try:
+            await send_keepalive_ping()
+        except Exception as e:
+            print("keepalive error:", e)
+        await asyncio.sleep(interval)
+
+
 # ── app lifecycle ───────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _keepalive_task
     await init_db()
     try:
         await ensure_vapid_keys_db(connect, DB_PATH)
@@ -710,7 +783,16 @@ async def lifespan(app: FastAPI):
             print("  Push: VAPID keys ready (file)")
         except Exception as e2:
             print("  Push: VAPID init failed", e, e2)
+    # anti-sleep: message Dada every 15 min while the process is up
+    _keepalive_task = asyncio.create_task(keepalive_loop())
+    print(f"  Keep-alive: every {KEEPALIVE_MINUTES}m → @{KEEPALIVE_NICK}")
     yield
+    if _keepalive_task:
+        _keepalive_task.cancel()
+        try:
+            await _keepalive_task
+        except asyncio.CancelledError:
+            pass
     await close_pool()
 
 
@@ -718,11 +800,11 @@ app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 # Bump this on every user-facing release — client shows «SMS» from Калаграм
 # (only for nick JOPA on the client)
-APP_VERSION = "1.25"
+APP_VERSION = "1.26"
 APP_UPDATE_NOTES = (
-    "Обнова 1.25 готова ✓\n"
-    "• Голос: фикс нестабильной пустой записи\n"
-    "• 🎤 → говорите ≥2 сек → ✓"
+    "Обнова 1.26 готова ✓\n"
+    "• Keep-alive: сайт не засыпает (пинг каждые 15 мин)\n"
+    "• Сообщения keep-alive → @Dada"
 )
 
 
@@ -737,12 +819,30 @@ async def health():
         "database": "postgres" if USE_PG else "sqlite",
         "persistent": bool(USE_PG),
         "push": True,
+        "keepalive_nick": KEEPALIVE_NICK,
+        "keepalive_minutes": KEEPALIVE_MINUTES,
         "hint": (
             "Данные на Neon — переживают перезапуск"
             if USE_PG
             else "SQLite на временном диске Render — после сна/деплоя данные могут пропасть. Добавьте DATABASE_URL (Neon)."
         ),
     }
+
+
+@app.get("/api/keepalive")
+async def keepalive_endpoint():
+    """
+    External pingers (GitHub Actions / UptimeRobot) hit this every 15 min
+    to wake the free dyno AND send an in-app ping to @Dada.
+    No push notification — only chat message.
+    """
+    try:
+        result = await send_keepalive_ping()
+        return {"ok": True, "woke": True, **result}
+    except Exception as e:
+        # Still return 200 so the pinger counts the dyno as up
+        print("keepalive endpoint error:", e)
+        return {"ok": False, "woke": True, "error": str(e)}
 
 
 class PushSubIn(BaseModel):

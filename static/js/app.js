@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.25";
+  const APP_VERSION = "1.26";
   const APP_UPDATE_NOTES =
-    "Обнова 1.25 готова ✓\n• Голос: один поток (фикс «то работает, то пустая»)\n• 🎤 → ≥2 сек → ✓";
+    "Обнова 1.26 готова ✓\n• Keep-alive каждые 15 мин (сайт не засыпает)\n• Пинг → @Dada";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
