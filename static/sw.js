@@ -1,5 +1,5 @@
 /* Калаграм — cache + Web Push (iOS home screen / Android) */
-const CACHE = "kalagram-v19";
+const CACHE = "kalagram-v20";
 const PRECACHE = ["/", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
