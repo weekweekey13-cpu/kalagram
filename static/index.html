@@ -20,7 +20,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png" />
   <title>Калаграм</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=31" />
+  <link rel="stylesheet" href="/static/css/style.css?v=32" />
 </head>
 <body>
   <div id="app">
@@ -149,9 +149,10 @@
           <button type="button" class="icon-btn" id="btn-back-chats" aria-label="Назад">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
-          <button type="button" class="chat-peer" id="btn-peer-info">
-            <div class="avatar avatar-sm" id="peer-avatar"></div>
-            <div class="chat-peer-meta">
+          <button type="button" class="chat-peer" id="btn-peer-info" aria-label="Профиль"
+            onclick="if(window.kalagramOpenPeerProfile){window.kalagramOpenPeerProfile(event);}return false;">
+            <div class="avatar avatar-sm" id="peer-avatar" style="pointer-events:none"></div>
+            <div class="chat-peer-meta" style="pointer-events:none">
               <div class="name" id="peer-name">—</div>
               <div class="status" id="peer-status">офлайн</div>
             </div>
@@ -337,6 +338,6 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js?v=31"></script>
+  <script src="/static/js/app.js?v=32"></script>
 </body>
 </html>

@@ -263,6 +263,11 @@ img { display: block; max-width: 100%; }
 
 .panel-overlay { z-index: 5; }
 .panel-chat { z-index: 4; }
+/* Peer profile always above chat on phone (iOS stacking / PWA) */
+#panel-peer-profile.panel-overlay {
+  z-index: 30;
+  background: var(--bg);
+}
 
 .topbar {
   display: flex;
@@ -307,10 +312,11 @@ img { display: block; max-width: 100%; }
 
 .icon-btn:active { background: var(--bg-hover); }
 
-/* Chat header peer — tappable */
+/* Chat header peer — tappable (iOS needs large hit area + touch-action) */
 .chat-peer {
   flex: 1;
   min-width: 0;
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -321,8 +327,16 @@ img { display: block; max-width: 100%; }
   background: transparent;
   color: inherit;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(108, 140, 255, 0.25);
+  position: relative;
+  z-index: 2;
 }
 .chat-peer:active { background: var(--bg-hover); }
+.chat-topbar {
+  position: relative;
+  z-index: 6;
+}
 .chat-peer-meta { min-width: 0; flex: 1; }
 .chat-peer-meta .name {
   font-weight: 600;
@@ -641,9 +655,11 @@ img { display: block; max-width: 100%; }
   align-items: center;
   gap: 10px;
   min-width: 0;
+  min-height: 44px;
   padding: 8px 4px;
   text-align: left;
   border-radius: var(--radius-sm);
+  touch-action: manipulation;
 }
 
 .chat-peer-meta { min-width: 0; }
