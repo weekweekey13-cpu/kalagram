@@ -843,11 +843,11 @@ app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 # Bump this on every user-facing release — client shows «SMS» from Калаграм
 # (only for nick JOPA on the client)
-APP_VERSION = "1.32"
+APP_VERSION = "1.33"
 APP_UPDATE_NOTES = (
-    "Обнова 1.32 готова ✓\n"
-    "• Клавиатура: ввод поднимается, шапка не улетает\n"
-    "• Профиль / уведомления / фото группы"
+    "Обнова 1.33 готова ✓\n"
+    "• Убран лишний зазор под вкладками Чаты/Контакты\n"
+    "• Клавиатура без сдвига экрана"
 )
 
 

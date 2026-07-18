@@ -12,7 +12,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="stylesheet" href="/static/css/style.css?v=36" />
+  <link rel="stylesheet" href="/static/css/style.css?v=37" />
   <!-- iPhone / iPad home screen icons -->
   <link rel="apple-touch-icon" href="/static/icons/icon-180.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/icon-180.png" />
@@ -352,7 +352,7 @@
     // Force iOS PWA off stale shell: when this HTML is first seen after an update,
     // drop service worker + Cache API once, then reload.
     (function () {
-      var SHELL = "1.32";
+      var SHELL = "1.33";
       try {
         var key = "kalagram_shell_v";
         var prev = localStorage.getItem(key);
@@ -382,6 +382,6 @@
       } catch (e) {}
     })();
   </script>
-  <script src="/static/js/app.js?v=36"></script>
+  <script src="/static/js/app.js?v=37"></script>
 </body>
 </html>

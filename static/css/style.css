@@ -77,17 +77,19 @@ img { display: block; max-width: 100%; }
 .hidden { display: none !important; }
 
 #app {
-  /* JS pins top/height to visualViewport on mobile (keyboard-safe) */
+  /* Default: full screen. JS only shortens while keyboard is open. */
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
+  bottom: 0;
   width: 100%;
   height: var(--app-height, 100dvh);
   max-height: none;
   overflow: hidden;
   transition: none !important;
   box-sizing: border-box;
+  background: var(--bg);
 }
 
 .view {
@@ -661,8 +663,10 @@ img { display: block; max-width: 100%; }
   left: 0;
   right: 0;
   bottom: 0;
+  /* border-box: height includes safe padding — no extra strip under bar */
   height: calc(var(--tabbar-h) + var(--safe-bottom));
   padding-bottom: var(--safe-bottom);
+  box-sizing: border-box;
   display: flex;
   background: rgba(18, 21, 28, 0.92);
   backdrop-filter: blur(20px);

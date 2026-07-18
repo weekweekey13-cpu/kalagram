@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.32";
+  const APP_VERSION = "1.33";
   const APP_UPDATE_NOTES =
-    "Обнова 1.32 готова ✓\n• Клавиатура: строка ввода поднимается, шапка на месте\n• Профиль / уведомления";
+    "Обнова 1.33 готова ✓\n• Убран лишний зазор под вкладками Чаты/Контакты\n• Клавиатура без сдвига экрана";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -296,11 +296,13 @@
   }
 
   /**
-   * iOS keyboard (Telegram-style):
-   * Pin #app exactly to visualViewport every frame.
-   * → topbar stays at top of visible area (no fly-away)
-   * → composer stays at bottom of visible area (above keyboard)
-   * Do NOT fight offsetTop with delayed scrollTo (that caused bounce).
+   * iOS keyboard + no phantom gap under tabbar (see Desktop/131.jpg).
+   *
+   * Bug: always pinning #app to visualViewport left empty strip under
+   * «Чаты/Контакты» even with keyboard closed (vv.height < innerHeight).
+   *
+   * Fix: full-screen shell by default; only shrink to visualViewport while
+   * a text field is focused AND the viewport really shrank (keyboard).
    */
   function setupKeyboardViewport() {
     if (setupKeyboardViewport._done) return;
@@ -313,8 +315,7 @@
     let raf = 0;
     let tracking = false;
     let trackRaf = 0;
-    let lastH = 0;
-    let lastTop = 0;
+    let lastKb = false;
 
     function measureSafeTop() {
       try {
@@ -336,6 +337,47 @@
       return window.matchMedia("(min-width: 1024px)").matches;
     }
 
+    function hasTextFocus() {
+      const ae = document.activeElement;
+      if (!ae || !/^(INPUT|TEXTAREA)$/.test(ae.tagName)) return false;
+      if (ae.type === "checkbox" || ae.type === "radio" || ae.type === "button") return false;
+      return true;
+    }
+
+    function fullLayoutHeight() {
+      const ih = Math.round(window.innerHeight || 0);
+      const ch = Math.round(document.documentElement.clientHeight || 0);
+      const vv = window.visualViewport;
+      // When keyboard is closed, use the largest stable height — never a
+      // partial visualViewport that leaves a gap under the tab bar.
+      let h = Math.max(ih, ch);
+      if (vv && !hasTextFocus()) {
+        const covered = Math.round((vv.offsetTop || 0) + (vv.height || 0));
+        if (covered > h) h = covered;
+      }
+      return h > 0 ? h : Math.round(window.screen?.height || 700);
+    }
+
+    function applyFullScreen() {
+      const h = fullLayoutHeight();
+      try {
+        window.scrollTo(0, 0);
+      } catch (_) {}
+      app.style.position = "fixed";
+      app.style.left = "0";
+      app.style.right = "0";
+      app.style.width = "100%";
+      app.style.bottom = "0";
+      app.style.top = "0";
+      app.style.transform = "none";
+      app.style.height = h + "px";
+      root.style.setProperty("--app-height", h + "px");
+      root.style.setProperty("--kb-inset", "0px");
+      root.style.setProperty("--vv-top", "0px");
+      document.body.classList.remove("kb-open");
+      lastKb = false;
+    }
+
     function resetShell() {
       app.style.position = "";
       app.style.top = "";
@@ -347,7 +389,9 @@
       app.style.transform = "";
       root.style.setProperty("--app-height", "100dvh");
       root.style.setProperty("--kb-inset", "0px");
+      root.style.setProperty("--vv-top", "0px");
       document.body.classList.remove("kb-open");
+      lastKb = false;
     }
 
     function applyViewport() {
@@ -361,66 +405,53 @@
         }
 
         const vv = window.visualViewport;
-        const layoutH = Math.round(window.innerHeight || 0);
+        const layoutH = fullLayoutHeight();
+        const vvH = vv ? Math.round(vv.height || 0) : layoutH;
+        const vvTop = vv ? Math.max(0, Math.round(vv.offsetTop || 0)) : 0;
+        const focused = hasTextFocus();
+        // Real software keyboard only — ignore tiny URL-bar / safe-area noise
+        const shrink = Math.max(0, layoutH - vvH - vvTop);
+        const kbOpen = focused && shrink > 140;
 
-        let top = 0;
-        let height = layoutH;
-        if (vv) {
-          top = Math.max(0, Math.round(vv.offsetTop || 0));
-          height = Math.max(200, Math.round(vv.height || layoutH));
+        if (!kbOpen) {
+          // Full bleed to bottom of phone — kills the strip under tabbar
+          applyFullScreen();
+          return;
         }
 
-        // Fill the visible viewport only (keyboard sits below this box)
+        // Keyboard open: fit shell to visible area above keyboard
         app.style.position = "fixed";
         app.style.left = "0";
         app.style.right = "0";
         app.style.width = "100%";
         app.style.bottom = "auto";
         app.style.transform = "none";
-        app.style.top = top + "px";
-        app.style.height = height + "px";
-
-        root.style.setProperty("--app-height", height + "px");
+        app.style.top = vvTop + "px";
+        app.style.height = Math.max(200, vvH) + "px";
+        root.style.setProperty("--app-height", Math.max(200, vvH) + "px");
         root.style.setProperty("--kb-inset", "0px");
-        root.style.setProperty("--vv-top", top + "px");
+        root.style.setProperty("--vv-top", vvTop + "px");
+        document.body.classList.add("kb-open");
 
-        const kbOpen = layoutH > 0 && height < layoutH - 90;
-        document.body.classList.toggle("kb-open", kbOpen);
-
-        // Keep chat scrolled to end so last messages stay visible above composer
-        if (
-          kbOpen &&
-          state.activePanel === "chat" &&
-          (height !== lastH || top !== lastTop)
-        ) {
+        if (!lastKb && state.activePanel === "chat") {
           const box = document.getElementById("messages");
-          if (box) {
-            const near =
-              box.scrollHeight - box.scrollTop - box.clientHeight < 180;
-            if (near) box.scrollTop = box.scrollHeight;
-          }
+          if (box) box.scrollTop = box.scrollHeight;
         }
-        lastH = height;
-        lastTop = top;
+        lastKb = true;
       });
     }
 
-    /** While typing, re-sync every frame so iOS can't leave header off-screen */
     function startTracking() {
       tracking = true;
       if (trackRaf) return;
       const tick = () => {
         applyViewport();
-        if (
-          tracking &&
-          document.activeElement &&
-          /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-        ) {
+        if (tracking && hasTextFocus()) {
           trackRaf = requestAnimationFrame(tick);
         } else {
           tracking = false;
           trackRaf = 0;
-          applyViewport();
+          applyFullScreen();
         }
       };
       trackRaf = requestAnimationFrame(tick);
@@ -432,14 +463,14 @@
         cancelAnimationFrame(trackRaf);
         trackRaf = 0;
       }
-      // After blur, keyboard animates closed — resync a few times
-      applyViewport();
-      setTimeout(applyViewport, 50);
-      setTimeout(applyViewport, 200);
-      setTimeout(applyViewport, 400);
+      // Keyboard close animation — restore full height several times
+      applyFullScreen();
+      setTimeout(applyFullScreen, 50);
+      setTimeout(applyFullScreen, 180);
+      setTimeout(applyFullScreen, 350);
+      setTimeout(applyFullScreen, 550);
     }
 
-    // Prevent focus scroll-into-view from moving chat chrome
     try {
       const origSiv = Element.prototype.scrollIntoView;
       Element.prototype.scrollIntoView = function (...args) {
@@ -460,24 +491,51 @@
 
     const st = measureSafeTop();
     root.style.setProperty("--safe-top-lock", st + "px");
-    applyViewport();
+    applyFullScreen();
     setTimeout(() => {
       root.style.setProperty("--safe-top-lock", measureSafeTop() + "px");
-      applyViewport();
+      applyFullScreen();
     }, 200);
 
     if (window.visualViewport) {
-      window.visualViewport.addEventListener("resize", applyViewport, {
-        passive: true,
-      });
-      window.visualViewport.addEventListener("scroll", applyViewport, {
-        passive: true,
-      });
+      // Only re-layout aggressively while typing; otherwise snap full screen
+      // so URL-bar / safe-area glitches can't leave a bottom gap.
+      window.visualViewport.addEventListener(
+        "resize",
+        () => {
+          if (hasTextFocus()) applyViewport();
+          else applyFullScreen();
+        },
+        { passive: true }
+      );
+      window.visualViewport.addEventListener(
+        "scroll",
+        () => {
+          if (hasTextFocus()) applyViewport();
+          else applyFullScreen();
+        },
+        { passive: true }
+      );
     }
-    window.addEventListener("resize", applyViewport, { passive: true });
+    window.addEventListener(
+      "resize",
+      () => {
+        if (hasTextFocus()) applyViewport();
+        else applyFullScreen();
+      },
+      { passive: true }
+    );
     window.addEventListener("orientationchange", () => {
-      setTimeout(applyViewport, 100);
-      setTimeout(applyViewport, 350);
+      setTimeout(applyFullScreen, 100);
+      setTimeout(applyFullScreen, 350);
+    });
+
+    // When app returns from background, kill any leftover gap
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        setTimeout(applyFullScreen, 50);
+        setTimeout(applyFullScreen, 300);
+      }
     });
 
     const bindInput = (el) => {
@@ -486,15 +544,11 @@
       el.addEventListener(
         "touchstart",
         () => {
-          applyViewport();
           startTracking();
         },
         { passive: true }
       );
-      el.addEventListener("focus", () => {
-        applyViewport();
-        startTracking();
-      });
+      el.addEventListener("focus", () => startTracking());
       el.addEventListener("blur", () => stopTracking());
     };
 
@@ -509,7 +563,6 @@
         const t = e.target;
         if (!t || !/^(INPUT|TEXTAREA)$/.test(t.tagName)) return;
         bindInput(t);
-        applyViewport();
         startTracking();
       },
       true
@@ -520,12 +573,7 @@
         const t = e.target;
         if (!t || !/^(INPUT|TEXTAREA)$/.test(t.tagName)) return;
         setTimeout(() => {
-          if (
-            !document.activeElement ||
-            !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-          ) {
-            stopTracking();
-          }
+          if (!hasTextFocus()) stopTracking();
         }, 0);
       },
       true
@@ -3821,7 +3869,7 @@
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
-        .register("/sw.js?v=10", { scope: "/" })
+        .register("/sw.js?v=11", { scope: "/" })
         .catch((e) => console.warn("SW register", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
         const d = ev.data || {};
@@ -3892,7 +3940,7 @@
         if (!fromButton) return;
       }
       // ensure SW controlling page
-      let reg = await navigator.serviceWorker.register("/sw.js?v=10", { scope: "/" });
+      let reg = await navigator.serviceWorker.register("/sw.js?v=11", { scope: "/" });
       reg = await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         // wait a bit for controller
