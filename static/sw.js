@@ -1,5 +1,5 @@
 /* Калаграм — push + minimal cache (never pin HTML/JS — iOS PWA was stuck on old shell) */
-const CACHE = "kalagram-v27";
+const CACHE = "kalagram-v28";
 const PRECACHE = ["/manifest.webmanifest", "/static/icons/icon-192.png"];
 
 self.addEventListener("install", (event) => {
