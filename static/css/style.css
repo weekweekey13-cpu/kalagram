@@ -25,9 +25,13 @@
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Locked on load so keyboard open doesn't collapse notch padding (iOS) */
+  --safe-top-lock: env(safe-area-inset-top, 0px);
+  --app-height: 100dvh;
   --topbar-h: 56px;
   --tabbar-h: 64px;
   --composer-h: 64px;
+  --kb-offset: 0px;
 }
 
 *,
@@ -40,8 +44,8 @@
 }
 
 html, body {
-  height: 100%;
-  height: 100dvh;
+  height: var(--app-height, 100dvh);
+  max-height: var(--app-height, 100dvh);
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
@@ -50,6 +54,12 @@ html, body {
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Pin document so iOS keyboard doesn't scroll the whole UI (header "flies" up) */
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  overscroll-behavior: none;
+  touch-action: manipulation;
 }
 
 button, input, textarea {
@@ -66,14 +76,17 @@ img { display: block; max-width: 100%; }
 
 #app {
   height: 100%;
-  height: 100dvh;
+  height: var(--app-height, 100dvh);
+  max-height: var(--app-height, 100dvh);
   position: relative;
   overflow: hidden;
+  width: 100%;
 }
 
 .view {
   height: 100%;
   width: 100%;
+  overflow: hidden;
 }
 
 /* ── Auth ─────────────────────────────────── */
@@ -284,8 +297,8 @@ img { display: block; max-width: 100%; }
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: calc(var(--topbar-h) + var(--safe-top));
-  padding: var(--safe-top) 12px 0;
+  min-height: calc(var(--topbar-h) + var(--safe-top-lock, var(--safe-top)));
+  padding: var(--safe-top-lock, var(--safe-top)) 12px 0;
   background: rgba(11, 13, 18, 0.85);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -344,9 +357,14 @@ img { display: block; max-width: 100%; }
   z-index: 2;
 }
 .chat-peer:active { background: var(--bg-hover); }
-.chat-topbar {
+.chat-topbar,
+#chat-topbar-normal,
+#chat-topbar-select {
   position: relative;
   z-index: 6;
+  flex-shrink: 0;
+  /* Stay pinned at top of chat column when keyboard opens */
+  top: 0;
 }
 .chat-peer-meta { min-width: 0; flex: 1; }
 .chat-peer-meta .name {
@@ -1014,6 +1032,22 @@ img { display: block; max-width: 100%; }
   border-top: 1px solid var(--border);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
+  /* When keyboard open, app height already shrinks — keep composer at bottom of flex */
+  position: relative;
+  z-index: 5;
+}
+
+/* Chat panel: flex column so topbar never leaves the top edge */
+#panel-chat.panel-chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+#panel-chat .messages {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .composer-inner {
