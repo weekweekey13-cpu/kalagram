@@ -843,11 +843,11 @@ app = FastAPI(title="Калаграм", lifespan=lifespan)
 
 # Bump this on every user-facing release — client shows «SMS» from Калаграм
 # (only for nick JOPA on the client)
-APP_VERSION = "1.34"
+APP_VERSION = "1.35"
 APP_UPDATE_NOTES = (
-    "Обнова 1.34 готова ✓\n"
-    "• Голосовые стабильно (как в Telegram)\n"
-    "• iPhone пишет надёжно, с ПК слышно на iPhone"
+    "Обнова 1.35 готова ✓\n"
+    "• Голосовые с иконки «Домой» (fix микрофона PWA)\n"
+    "• Safari + ПК как раньше"
 )
 
 

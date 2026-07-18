@@ -6,9 +6,9 @@
   "use strict";
 
   // Keep in sync with server APP_VERSION — used for update «SMS» + cache bust
-  const APP_VERSION = "1.34";
+  const APP_VERSION = "1.35";
   const APP_UPDATE_NOTES =
-    "Обнова 1.34 готова ✓\n• Голосовые стабильно (как в Telegram)\n• iPhone пишет WAV, ПК → конвертация для iPhone";
+    "Обнова 1.35 готова ✓\n• Голосовые с иконки «Домой» (PWA mic fix)\n• Safari + ПК как раньше";
   const VERSION_SEEN_KEY = "kalagram_seen_version";
   const UPDATES_KEY = "kalagram_updates";
   // Only this nick sees «SMS» from Калаграм about updates
@@ -2538,6 +2538,7 @@
     mime: "audio/mp4",
     mode: "", // "pcm" | "mr" | "both"
     peak: 0,
+    maxPeak: 0,
   };
 
   function isIOSDevice() {
@@ -2545,6 +2546,18 @@
       /iPad|iPhone|iPod/.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
     );
+  }
+
+  /** iPhone home-screen PWA (Домой) — mic/AudioContext behaves differently than Safari tab */
+  function isStandalonePWA() {
+    try {
+      if (window.navigator.standalone === true) return true;
+    } catch {}
+    try {
+      if (window.matchMedia("(display-mode: standalone)").matches) return true;
+      if (window.matchMedia("(display-mode: fullscreen)").matches) return true;
+    } catch {}
+    return false;
   }
 
   function voiceSleep(ms) {
@@ -2764,6 +2777,7 @@
       }
       peak = peak * 0.85 + p * 0.15;
       Voice.peak = peak;
+      if (peak > (Voice.maxPeak || 0)) Voice.maxPeak = peak;
     };
     source.connect(proc);
     proc.connect(silent);
@@ -2807,16 +2821,16 @@
       samples.set(chunks[i], off);
       off += chunks[i].length;
     }
-    // Reject pure silence (no peak above noise floor)
+    // Reject pure silence (common when AudioContext was suspended in PWA)
     let maxAbs = 0;
     const step = Math.max(1, Math.floor(samples.length / 2000));
     for (let i = 0; i < samples.length; i += step) {
       const v = Math.abs(samples[i]);
       if (v > maxAbs) maxAbs = v;
     }
-    if (maxAbs < 0.004) {
-      console.warn("voice PCM silence", maxAbs, total);
-      // still encode — better a quiet clip than empty; server rejects tiny only
+    if (maxAbs < 0.0035) {
+      console.warn("voice PCM silence — discard", maxAbs, total);
+      return null;
     }
     return encodeWavLocal(downsampleMono(samples, p.sampleRate, 16000), 16000);
   }
@@ -3021,14 +3035,36 @@
   }
 
   async function ensureAudioCtxRunning() {
-    const ctx = voiceUnlockCtx();
+    // Recreate if dead/suspended — critical for iOS «Домой» after await getUserMedia
+    try {
+      if (Voice.audioCtx && Voice.audioCtx.state === "closed") {
+        Voice.audioCtx = null;
+      }
+    } catch {
+      Voice.audioCtx = null;
+    }
+    let ctx = voiceUnlockCtx();
     if (!ctx) return null;
-    if (ctx.state === "suspended") {
+    for (let i = 0; i < 4; i++) {
+      if (ctx.state === "running") return ctx;
       try {
-        await withTimeout(Promise.resolve(ctx.resume()).catch(() => {}), 1500, "resume");
+        await Promise.resolve(ctx.resume());
+      } catch {}
+      await voiceSleep(40 + i * 40);
+      if (ctx.state === "running") return ctx;
+    }
+    // Last resort: brand-new context
+    try {
+      if (ctx.state !== "closed") ctx.close().catch(() => {});
+    } catch {}
+    Voice.audioCtx = null;
+    ctx = voiceUnlockCtx();
+    if (ctx && ctx.state === "suspended") {
+      try {
+        await Promise.resolve(ctx.resume());
       } catch {}
     }
-    return ctx;
+    return ctx && ctx.state !== "closed" ? ctx : null;
   }
 
   async function voiceStart() {
@@ -3056,8 +3092,9 @@
     const myGen = ++Voice.gen;
     Voice.phase = "starting";
     const ios = isIOSDevice();
+    const home = isStandalonePWA();
 
-    // Must unlock AudioContext inside user gesture (before await)
+    // Unlock AudioContext inside user gesture (before any await)
     voiceUnlockCtx();
 
     try {
@@ -3081,10 +3118,21 @@
 
       Voice.stream = stream;
       state.micStream = stream;
-      await waitTrackUnmuted(stream.getAudioTracks()[0], 1200);
+
+      const track = stream.getAudioTracks()[0];
+      if (track) {
+        try {
+          track.enabled = true;
+        } catch {}
+        // iOS PWA sometimes hands a muted track — wait for unmute
+        await waitTrackUnmuted(track, home ? 2500 : 1200);
+        if (track.readyState !== "live") {
+          throw new Error("Микрофон не активен. Настройки → Калаграм → Микрофон");
+        }
+      }
       if (myGen !== Voice.gen) return false;
 
-      // Fresh AudioContext per take (avoids suspended/closed quirks)
+      // Fresh AudioContext AFTER mic stream (gesture may be "spent" — re-resume hard)
       try {
         if (Voice.audioCtx && Voice.audioCtx.state !== "closed") {
           Voice.audioCtx.close().catch(() => {});
@@ -3099,21 +3147,44 @@
       Voice.startedAt = Date.now();
       Voice.mode = "";
       Voice.peak = 0;
+      Voice.maxPeak = 0;
 
       let ok = false;
 
-      if (ios) {
-        // iPhone: PCM → WAV is the reliable path
-        if (ctx && startPcmCapture(stream, ctx)) {
-          Voice.mode = "pcm";
-          ok = true;
-        } else if (startMediaRecorder(stream)) {
-          // rare fallback
+      if (ios && home) {
+        // ── iPhone «Домой» (PWA): AudioContext/PCM often silent ──
+        // MediaRecorder(mp4) first — do NOT attach PCM graph (mutes MR on WebKit)
+        if (startMediaRecorder(stream)) {
           Voice.mode = "mr";
           ok = true;
         }
+        // Optional PCM only if context is truly running AND MR failed
+        if (!ok && ctx && ctx.state === "running") {
+          try {
+            if (startPcmCapture(stream, ctx)) {
+              Voice.mode = "pcm";
+              ok = true;
+            }
+          } catch (e) {
+            console.warn("PWA PCM fail", e);
+          }
+        }
+      } else if (ios) {
+        // ── Safari tab: PCM → WAV works well ──
+        if (ctx && ctx.state === "running" && startPcmCapture(stream, ctx)) {
+          Voice.mode = "pcm";
+          ok = true;
+        }
+        // Also start MR as safety net (before PCM connection if PCM failed)
+        if (!ok && startMediaRecorder(stream)) {
+          Voice.mode = "mr";
+          ok = true;
+        } else if (ok && startMediaRecorder(stream)) {
+          // PCM already connected — MR may be empty; still try both
+          Voice.mode = "both";
+        }
       } else {
-        // Desktop: MediaRecorder primary + PCM backup on same stream
+        // Desktop: MediaRecorder + PCM backup
         if (startMediaRecorder(stream)) {
           Voice.mode = "mr";
           ok = true;
@@ -3134,16 +3205,32 @@
       if (!ok) {
         Voice.phase = "idle";
         discardMicStream();
-        toast("Запись не поддерживается на этом устройстве");
+        toast(
+          home
+            ? "Микрофон недоступен с «Домой». Настройки → Калаграм → Микрофон → Вкл"
+            : "Запись не поддерживается на этом устройстве",
+          6000
+        );
         return false;
       }
 
-      // Tiny warm-up so first 100ms of PCM/MR aren't silent
-      await voiceSleep(ios ? 80 : 40);
+      await voiceSleep(home ? 150 : ios ? 80 : 40);
       if (myGen !== Voice.gen) return false;
+
+      // Re-check track still live after warm-up
+      if (track && track.readyState !== "live") {
+        Voice.phase = "idle";
+        discardMicStream();
+        toast("Микрофон отключился. Разрешите доступ для Калаграм в Настройках", 6000);
+        return false;
+      }
 
       Voice.phase = "recording";
       showRecordUI();
+      if (home && Voice.mode === "mr") {
+        const hint = $("#rec-hint");
+        if (hint) hint.textContent = "Говорите… затем ✓";
+      }
       return true;
     } catch (err) {
       if (myGen !== Voice.gen) return false;
@@ -3155,11 +3242,16 @@
       hideRecordUI();
       const name = err && err.name;
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-        toast("Профиль → «Разрешить микрофон» → Разрешить", 6000);
+        toast(
+          home
+            ? "Настройки iPhone → Калаграм → Микрофон → разрешите"
+            : "Профиль → «Разрешить микрофон» → Разрешить",
+          7000
+        );
       } else if (name === "NotFoundError") {
         toast("Микрофон не найден");
       } else {
-        toast((err && err.message) || "Ошибка микрофона", 4500);
+        toast((err && err.message) || "Ошибка микрофона", 5000);
       }
       return false;
     } finally {
@@ -3176,9 +3268,10 @@
     // Brief settle so last buffers land
     const elapsed = (Date.now() - t0) / 1000;
     if (mode === "mr" || mode === "both") {
-      // timeslice 250ms — half slice is enough
-      if (elapsed < 0.45) await voiceSleep(Math.ceil((0.45 - elapsed) * 1000) + 40);
-      else await voiceSleep(120);
+      // iOS PWA needs a bit longer for first m4a fragment
+      const need = isStandalonePWA() ? 0.7 : 0.45;
+      if (elapsed < need) await voiceSleep(Math.ceil((need - elapsed) * 1000) + 50);
+      else await voiceSleep(isStandalonePWA() ? 200 : 120);
     } else {
       if (elapsed < 0.35) await voiceSleep(Math.ceil((0.35 - elapsed) * 1000) + 30);
       else await voiceSleep(60);
@@ -3342,11 +3435,14 @@
         return;
       }
       if (!blob || blob.size < MIN_BLOB) {
+        const home = isStandalonePWA();
         toast(
-          Voice.peak < 0.01
-            ? "Микрофон молчит. Проверьте доступ в Настройках iPhone"
-            : "Пустая запись. Говорите громче и нажмите ✓",
-          5000
+          home
+            ? "С «Домой» микрофон пустой. Настройки → Калаграм → Микрофон → Вкл. Или откройте сайт в Safari"
+            : Voice.maxPeak < 0.01 && Voice.peak < 0.01
+              ? "Микрофон молчит. Проверьте доступ в Настройках"
+              : "Пустая запись. Говорите громче ≥1 сек, потом ✓",
+          6500
         );
         Voice.phase = "idle";
         return;
@@ -4062,7 +4158,7 @@
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
-        .register("/sw.js?v=12", { scope: "/" })
+        .register("/sw.js?v=13", { scope: "/" })
         .catch((e) => console.warn("SW register", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
         const d = ev.data || {};
@@ -4133,7 +4229,7 @@
         if (!fromButton) return;
       }
       // ensure SW controlling page
-      let reg = await navigator.serviceWorker.register("/sw.js?v=12", { scope: "/" });
+      let reg = await navigator.serviceWorker.register("/sw.js?v=13", { scope: "/" });
       reg = await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) {
         // wait a bit for controller
